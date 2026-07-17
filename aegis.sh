@@ -9,7 +9,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROLES="$HERE/roles.json"
-OSSEC="${OSSEC_DIR:-/var/ossec}"
+case "$(uname -s)" in Darwin) OSSEC="${OSSEC_DIR:-/Library/Ossec}" ;; *) OSSEC="${OSSEC_DIR:-/var/ossec}" ;; esac
 LOGDIR="/var/log/aegis"
 APPLY=0; ROLE=""
 

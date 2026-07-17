@@ -15,7 +15,7 @@ REPO="${AEGIS_REPO:-veteranop/Aegis}"
 REF="${AEGIS_REF:-main}"                 # PIN a tag/commit in prod
 TOKEN="${AEGIS_TOKEN:-}"
 NO_RC="${AEGIS_NO_REMOTE_COMMANDS:-0}"
-OSSEC="${OSSEC_DIR:-/var/ossec}"
+case "$(uname -s)" in Darwin) OSSEC="${OSSEC_DIR:-/Library/Ossec}" ;; *) OSSEC="${OSSEC_DIR:-/var/ossec}" ;; esac
 
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
 [ -d "$OSSEC" ] || { echo "Wazuh agent not found at $OSSEC - install/enroll it first; Aegis rides on it" >&2; exit 1; }
