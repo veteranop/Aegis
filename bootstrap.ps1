@@ -64,6 +64,17 @@ if exist "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe" set "PS=
 "%PS%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0aegis\aegis.ps1" %*
 '@
 
+# 4b. LIVE apply wrapper — separate AR command so dry-run stays the default trigger
+$cmdApply = Join-Path $agent "active-response\bin\aegis-apply.cmd"
+Set-Content -Path $cmdApply -Encoding ASCII -Value @'
+@echo off
+rem LIVE Aegis run: actually patches, may reboot per role policy. See aegis.cmd
+rem for why 64-bit PowerShell must be forced via sysnative.
+set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if exist "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe" set "PS=%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe"
+"%PS%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0aegis\aegis.ps1" -Apply %*
+'@
+
 # 5. enable remote_commands (the accepted-risk gate) unless told not to
 if (-not $NoRemoteCommands) {
     $lio = Join-Path $agent "local_internal_options.conf"

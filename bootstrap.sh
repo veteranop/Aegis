@@ -45,6 +45,14 @@ exec "$(dirname "$0")/aegis/aegis.sh" "$@"
 WRAP
 chmod +x "$OSSEC/active-response/bin/aegis"
 
+# LIVE apply wrapper — separate AR command so dry-run stays the default trigger
+cat > "$OSSEC/active-response/bin/aegis-apply" <<'WRAP'
+#!/usr/bin/env bash
+# LIVE Aegis run: actually patches, may reboot per role policy
+exec "$(dirname "$0")/aegis/aegis.sh" --apply "$@"
+WRAP
+chmod +x "$OSSEC/active-response/bin/aegis-apply"
+
 # enable remote_commands (the accepted-risk gate)
 if [ "$NO_RC" != "1" ]; then
   LIO="$OSSEC/etc/local_internal_options.conf"

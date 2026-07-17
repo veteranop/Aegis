@@ -74,6 +74,46 @@ else
   echo "== AR commands already present, skipping =="
 fi
 
+# --- 1b. LIVE apply commands (separate trigger: dry-run stays the default) ---
+if ! grep -q "<name>aegis-win-apply</name>" "$CONF"; then
+  echo "== adding Aegis APPLY commands to ossec.conf =="
+  AR_BLOCK=$(cat <<'XML'
+
+  <!-- Aegis LIVE apply (added by server-setup) — actually patches; may reboot per role policy -->
+  <command>
+    <name>aegis-win-apply</name>
+    <executable>aegis-apply.cmd</executable>
+    <timeout_allowed>no</timeout_allowed>
+  </command>
+  <command>
+    <name>aegis-nix-apply</name>
+    <executable>aegis-apply</executable>
+    <timeout_allowed>no</timeout_allowed>
+  </command>
+  <active-response>
+    <disabled>no</disabled>
+    <command>aegis-win-apply</command>
+    <location>local</location>
+  </active-response>
+  <active-response>
+    <disabled>no</disabled>
+    <command>aegis-nix-apply</command>
+    <location>local</location>
+  </active-response>
+XML
+)
+  python3 - "$CONF" "$AR_BLOCK" <<'PY'
+import sys
+conf, block = sys.argv[1], sys.argv[2]
+s = open(conf, encoding="utf-8").read()
+idx = s.rfind("</ossec_config>")
+s = s[:idx] + block + "\n" + s[idx:]
+open(conf, "w", encoding="utf-8").write(s)
+PY
+else
+  echo "== Aegis APPLY commands already present, skipping =="
+fi
+
 # --- 2. role groups + shared agent.conf (label + app-log localfile) ---
 for role in "${ROLES[@]}"; do
   gdir="$SHARED/$role"; ac="$gdir/agent.conf"

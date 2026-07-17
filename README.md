@@ -58,6 +58,9 @@ curl -fsSL "https://raw.githubusercontent.com/veteranop/Aegis/$AEGIS_REF/bootstr
   ```
   > The API validates the name against `ar.conf`, which appends the timeout suffix — so it's
   > **`aegis-win0`/`aegis-nix0`**, not the bare `<command>` name from `ossec.conf`.
+- **Live patching:** the dry-run commands above are the safe default. To actually patch, fire the
+  separate apply commands — **`aegis-win-apply0`** / **`aegis-nix-apply0`** — which run the engine
+  with `-Apply`/`--apply`. A live run installs updates and **may reboot** per the role's policy.
 - **Scheduled:** a Wazuh `wodle command` in the group's shared config.
 - **Manual/test:** `aegis.ps1 -Role personal` (dry run) — the engine refuses to patch a machine it
   can't identify.
