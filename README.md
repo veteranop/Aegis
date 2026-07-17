@@ -31,15 +31,15 @@ in production and verify checksums (`SHA256SUMS`).
 
 **Windows** (Administrator):
 ```powershell
-$env:AEGIS_REF='v0.1'; $env:AEGIS_TOKEN='<token-if-private>'
-irm "https://raw.githubusercontent.com/veteranop/Aegis/$($env:AEGIS_REF)/bootstrap.ps1" -Headers @{Authorization="token $($env:AEGIS_TOKEN)"} | iex
+$env:AEGIS_REF='main'
+irm "https://raw.githubusercontent.com/veteranop/Aegis/$($env:AEGIS_REF)/bootstrap.ps1" | iex
 ```
 **Linux/macOS** (sudo):
 ```bash
-export AEGIS_REF=v0.1 AEGIS_TOKEN=<token-if-private>
-curl -fsSL -H "Authorization: token $AEGIS_TOKEN" \
-  "https://raw.githubusercontent.com/veteranop/Aegis/$AEGIS_REF/bootstrap.sh" | sudo -E bash
+export AEGIS_REF=main
+curl -fsSL "https://raw.githubusercontent.com/veteranop/Aegis/$AEGIS_REF/bootstrap.sh" | sudo -E bash
 ```
+> Public repo — no token needed. **Pin `AEGIS_REF` to a release tag** (not `main`) in production, and the bootstrap verifies `SHA256SUMS` before installing.
 
 ## Running
 - **On-demand:** the Wazuh manager triggers `aegis` via Active Response (`PUT /active-response`).
