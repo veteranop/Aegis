@@ -20,7 +20,9 @@ case "$(uname -s)" in Darwin) OSSEC="${OSSEC_DIR:-/Library/Ossec}" ;; *) OSSEC="
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
 [ -d "$OSSEC" ] || { echo "Wazuh agent not found at $OSSEC - install/enroll it first; Aegis rides on it" >&2; exit 1; }
 
-DEST="$OSSEC/active-response/bin/aegis"
+# engine lives in aegis.d/ — bin/aegis itself must stay free for the AR wrapper
+# FILE (ossec.conf's <executable>aegis</executable> resolves to bin/aegis)
+DEST="$OSSEC/active-response/bin/aegis.d"
 mkdir -p "$DEST"
 AUTH=(); [ -n "$TOKEN" ] && AUTH=(-H "Authorization: token $TOKEN")
 
@@ -38,10 +40,14 @@ while read -r want name; do
   [ "$have" = "$want" ] || { echo "checksum mismatch on $name - refusing to install" >&2; exit 1; }
 done < <(grep -E "$(printf '%s|' aegis.sh roles.json "$PATCH" | sed 's/|$//')" "$DEST/SHA256SUMS" 2>/dev/null || true)
 
+# migrate pre-v0.4 layout: bin/aegis used to be the engine DIR, which collided
+# with the wrapper file below (only ever held our own re-downloadable files)
+[ -d "$OSSEC/active-response/bin/aegis" ] && rm -rf "$OSSEC/active-response/bin/aegis"
+
 # AR wrapper so the Wazuh manager can invoke the engine (AR runs an executable in bin/)
 cat > "$OSSEC/active-response/bin/aegis" <<'WRAP'
 #!/usr/bin/env bash
-exec "$(dirname "$0")/aegis/aegis.sh" "$@"
+exec "$(dirname "$0")/aegis.d/aegis.sh" "$@"
 WRAP
 chmod +x "$OSSEC/active-response/bin/aegis"
 
@@ -49,7 +55,7 @@ chmod +x "$OSSEC/active-response/bin/aegis"
 cat > "$OSSEC/active-response/bin/aegis-apply" <<'WRAP'
 #!/usr/bin/env bash
 # LIVE Aegis run: actually patches, may reboot per role policy
-exec "$(dirname "$0")/aegis/aegis.sh" --apply "$@"
+exec "$(dirname "$0")/aegis.d/aegis.sh" --apply "$@"
 WRAP
 chmod +x "$OSSEC/active-response/bin/aegis-apply"
 
