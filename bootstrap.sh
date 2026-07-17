@@ -28,7 +28,9 @@ AUTH=(); [ -n "$TOKEN" ] && AUTH=(-H "Authorization: token $TOKEN")
 
 case "$(uname -s)" in Darwin) PATCH="patch-mac.sh" ;; *) PATCH="patch-linux.sh" ;; esac
 for f in aegis.sh roles.json "$PATCH" SHA256SUMS; do
-  curl -fsSL "${AUTH[@]}" "https://raw.githubusercontent.com/$REPO/$REF/$f" -o "$DEST/$f"
+  # ${arr[@]+...} guard: bash 3.2 (macOS) treats expanding an EMPTY array as
+  # an unbound variable under set -u
+  curl -fsSL ${AUTH[@]+"${AUTH[@]}"} "https://raw.githubusercontent.com/$REPO/$REF/$f" -o "$DEST/$f"
 done
 chmod +x "$DEST/aegis.sh" "$DEST/$PATCH"
 
@@ -82,7 +84,7 @@ if [ -z "$SEL" ] && [ "${#ROLE_NAMES[@]}" -gt 0 ] && [ -r /dev/tty ] && [ -w /de
   {
     echo ""
     echo "Select this machine's Aegis role (the manager's aegis.role label always overrides):"
-    i=1; for r in "${ROLE_NAMES[@]}"; do echo "  $i) $r"; i=$((i+1)); done
+    i=1; for r in ${ROLE_NAMES[@]+"${ROLE_NAMES[@]}"}; do echo "  $i) $r"; i=$((i+1)); done
     echo "  0) skip - identify via Wazuh label only"
     printf "Role [0-%s]: " "${#ROLE_NAMES[@]}"
   } > /dev/tty
@@ -93,7 +95,7 @@ if [ -z "$SEL" ] && [ "${#ROLE_NAMES[@]}" -gt 0 ] && [ -r /dev/tty ] && [ -w /de
   esac
 fi
 if [ -n "$SEL" ]; then
-  printf '%s\n' "${ROLE_NAMES[@]}" | grep -qx "$SEL" || { echo "role '$SEL' not in roles.json" >&2; exit 1; }
+  printf '%s\n' ${ROLE_NAMES[@]+"${ROLE_NAMES[@]}"} | grep -qx "$SEL" || { echo "role '$SEL' not in roles.json" >&2; exit 1; }
   mkdir -p /etc/aegis && printf '%s\n' "$SEL" > /etc/aegis/role
   echo "Aegis role -> '$SEL' (local file; manager label overrides)"
 fi
