@@ -36,12 +36,22 @@ function Write-AegisLog {
 }
 
 # --- resolve winget under SYSTEM (per-user shim is invisible to LocalSystem) ---
+# Candidates are TESTED with --version: under LocalSystem, Get-Command can resolve to
+# the systemprofile's WindowsApps reparse-point alias, which exists but is NOT
+# executable by SYSTEM ("The file cannot be accessed by the system"). Only the real
+# packaged exe under Program Files\WindowsApps runs reliably in SYSTEM context.
 function Resolve-Winget {
+  $candidates = @()
+  $candidates += Get-ChildItem "$env:ProgramFiles\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" `
+        -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | ForEach-Object { $_.FullName }
   $cmd = Get-Command winget.exe -ErrorAction SilentlyContinue
-  if ($cmd) { return $cmd.Source }
-  $p = Get-ChildItem "$env:ProgramFiles\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" `
-        -ErrorAction SilentlyContinue | Sort-Object FullName | Select-Object -Last 1
-  if ($p) { return $p.FullName }
+  if ($cmd) { $candidates += $cmd.Source }
+  foreach ($c in $candidates) {
+    try {
+      $null = & $c --version 2>$null
+      if ($LASTEXITCODE -eq 0) { return $c }
+    } catch { }
+  }
   return $null
 }
 
@@ -86,7 +96,12 @@ try {
       }
     }
     Import-Module PSWindowsUpdate -ErrorAction SilentlyContinue
-    if ($DryRun) {
+    if (-not (Get-Command Get-WindowsUpdate -ErrorAction SilentlyContinue)) {
+      # dry-run must not install software; note the gap instead of dying on a
+      # missing cmdlet (a CommandNotFound is terminating under EAP=Stop)
+      $result.errors += "PSWindowsUpdate unavailable - OS update check skipped (install with -Scope AllUsers)"
+      Write-Warning "Aegis: PSWindowsUpdate unavailable - OS update check skipped"
+    } elseif ($DryRun) {
       $pending = Get-WindowsUpdate -ErrorAction SilentlyContinue
       Write-Output "DRY RUN - pending OS updates: $($pending.Count)"
       $result.os_updates = @($pending).Count
