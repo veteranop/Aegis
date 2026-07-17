@@ -1,0 +1,10 @@
+{
+  "_comment": "Aegis GENERIC role -> policy. Client-agnostic - NO client data here. A machine's role comes from its Wazuh agent label 'aegis.role' (set per group via shared agent.conf). Per-machine line-of-business pins come from the optional 'aegis.pin' label (comma-separated), delivered by Wazuh - never hardcoded here. Safe to publish.",
+
+  "personal":    { "apps": "all",         "os": "all",       "reboot": "auto",     "pins": [] },
+  "workstation": { "apps": "all",         "os": "security",  "reboot": "deferred", "pins": [] },
+  "clinical":    { "apps": "all",         "os": "security",  "reboot": "never",    "pins": [] },
+  "server":      { "apps": "pinned-safe", "os": "scheduled", "reboot": "never",    "pins": [] },
+  "mac":         { "apps": "all",         "os": "all",       "reboot": "never",    "pins": [] },
+  "linux":       { "apps": "all",         "os": "all",       "reboot": "never",    "pins": [] }
+}

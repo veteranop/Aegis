@@ -1,0 +1,12 @@
+# Aegis — keep the repo GENERIC. Never commit fleet/client-specific data.
+# Client policy (pins, group→client mapping) lives in Wazuh, not here.
+config/
+exclusions.json
+*.exclusions.json
+secrets/
+*.env
+*.key
+*.pem
+*.conf
+*.log
+.DS_Store
