@@ -29,9 +29,23 @@ if (-not $RolesFile) { $RolesFile = Join-Path $here "roles.json" }
 $start = Get-Date
 
 function Write-AppLog($obj) {
+  # NOT Add-Content: once the Wazuh logcollector tails this file it holds a handle
+  # that denies write sharing, so a plain append fails forever. Open with
+  # FileShare ReadWrite|Delete (+ retry) so logger and collector coexist.
   try {
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-    ($obj | ConvertTo-Json -Compress -Depth 6) | Add-Content -Path (Join-Path $LogDir "aegis-app.log")
+    $line = ($obj | ConvertTo-Json -Compress -Depth 6)
+    $path = Join-Path $LogDir "aegis-app.log"
+    for ($i = 0; $i -lt 5; $i++) {
+      try {
+        $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write,
+              ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+        try { $sw = New-Object System.IO.StreamWriter($fs); $sw.WriteLine($line); $sw.Flush(); $sw.Close() }
+        finally { $fs.Dispose() }
+        return
+      } catch { Start-Sleep -Milliseconds 200 }
+    }
+    Write-Warning "Aegis: could not write app log after retries"
   } catch { }
 }
 
