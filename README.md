@@ -49,6 +49,15 @@ curl -fsSL "https://raw.githubusercontent.com/veteranop/Aegis/$AEGIS_REF/bootstr
 ```
 > Public repo — no token needed. **Pin `AEGIS_REF` to a release tag** (not `main`) in production, and the bootstrap verifies `SHA256SUMS` before installing.
 
+## Picking a role at install time
+The bootstrap offers a numbered **role picker** (or pre-select with `AEGIS_ROLE=clinical` /
+`-Role clinical` for scripted installs) and writes the choice to a local role file
+(`%ProgramData%\Aegis\role` / `/etc/aegis/role`) — the box is patch-ready the moment
+bootstrap finishes. Identity resolution order: **Wazuh `aegis.role` label (authoritative,
+set per group on the manager) → local role file → refuse to patch blind.** The engine logs
+which source it used (`source: wazuh-label | local-file | override`), so central labels
+always win once assigned and any local-file box is visible in your SIEM.
+
 ## Running
 - **On-demand:** the Wazuh manager triggers `aegis` via Active Response:
   ```bash

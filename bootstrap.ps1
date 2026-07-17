@@ -16,6 +16,7 @@ param(
   [string]$Repo  = "veteranop/Aegis",
   [string]$Ref   = $(if ($env:AEGIS_REF) { $env:AEGIS_REF } else { "main" }),   # PIN a tag/commit in prod
   [string]$Token = $env:AEGIS_TOKEN,        # required for a private repo
+  [string]$Role  = $env:AEGIS_ROLE,         # pre-select the role (skips the interactive picker)
   [switch]$NoRemoteCommands                 # install engine but skip the remote_commands flip
 )
 $ErrorActionPreference = "Stop"
@@ -87,6 +88,24 @@ if (-not $NoRemoteCommands) {
 
 # 6. app-log dir (manager's shared config adds the <localfile> to ship it to Wazuh)
 New-Item -ItemType Directory -Force -Path "$env:ProgramData\Aegis" | Out-Null
+
+# 6b. role picker -> live from the start. The engine resolves: Wazuh label
+# (authoritative, set per group on the manager) > this local file > refuse.
+$roleNames = @((Get-Content (Join-Path $dest "roles.json") -Raw | ConvertFrom-Json).PSObject.Properties.Name)
+if (-not $Role -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+  Write-Host "`nSelect this machine's Aegis role (the manager's aegis.role label always overrides):"
+  for ($i = 0; $i -lt $roleNames.Count; $i++) { Write-Host ("  {0}) {1}" -f ($i + 1), $roleNames[$i]) }
+  Write-Host "  0) skip - identify via Wazuh label only"
+  $sel = Read-Host "Role [0-$($roleNames.Count)]"
+  if ($sel -match '^\d+$' -and [int]$sel -ge 1 -and [int]$sel -le $roleNames.Count) {
+    $Role = $roleNames[[int]$sel - 1]
+  }
+}
+if ($Role) {
+  if ($roleNames -notcontains $Role) { throw "role '$Role' not in roles.json (valid: $($roleNames -join ', '))" }
+  Set-Content -Path "$env:ProgramData\Aegis\role" -Encoding ASCII -Value $Role
+  Write-Host "Aegis role -> '$Role' (local file; manager label overrides)"
+}
 
 # 7. restart the agent to pick up config
 foreach ($svc in @("WazuhSvc", "Wazuh", "OssecSvc")) {

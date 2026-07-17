@@ -64,6 +64,34 @@ if [ "$NO_RC" != "1" ]; then
 fi
 
 mkdir -p /var/log/aegis
+
+# role picker -> live from the start. Engine resolves: Wazuh label (authoritative)
+# > /etc/aegis/role (this file) > refuse. AEGIS_ROLE env pre-selects; the menu
+# reads /dev/tty so it works under `curl | sudo bash`.
+SEL="${AEGIS_ROLE:-}"
+ROLE_NAMES=()   # (no mapfile: macOS ships bash 3.2)
+while IFS= read -r _r; do [ -n "$_r" ] && ROLE_NAMES+=("$_r"); done \
+  < <(python3 -c "import json;print('\n'.join(json.load(open('$DEST/roles.json'))))" 2>/dev/null)
+if [ -z "$SEL" ] && [ "${#ROLE_NAMES[@]}" -gt 0 ] && [ -r /dev/tty ] && [ -w /dev/tty ]; then
+  {
+    echo ""
+    echo "Select this machine's Aegis role (the manager's aegis.role label always overrides):"
+    i=1; for r in "${ROLE_NAMES[@]}"; do echo "  $i) $r"; i=$((i+1)); done
+    echo "  0) skip - identify via Wazuh label only"
+    printf "Role [0-%s]: " "${#ROLE_NAMES[@]}"
+  } > /dev/tty
+  read -r sel < /dev/tty || sel=""
+  case "$sel" in
+    ''|*[!0-9]*) : ;;
+    *) [ "$sel" -ge 1 ] && [ "$sel" -le "${#ROLE_NAMES[@]}" ] && SEL="${ROLE_NAMES[$((sel-1))]}" ;;
+  esac
+fi
+if [ -n "$SEL" ]; then
+  printf '%s\n' "${ROLE_NAMES[@]}" | grep -qx "$SEL" || { echo "role '$SEL' not in roles.json" >&2; exit 1; }
+  mkdir -p /etc/aegis && printf '%s\n' "$SEL" > /etc/aegis/role
+  echo "Aegis role -> '$SEL' (local file; manager label overrides)"
+fi
+
 # restart the agent
 if command -v systemctl >/dev/null 2>&1; then systemctl restart wazuh-agent 2>/dev/null || true
 else "$OSSEC/bin/wazuh-control" restart 2>/dev/null || "$OSSEC/bin/ossec-control" restart 2>/dev/null || true; fi

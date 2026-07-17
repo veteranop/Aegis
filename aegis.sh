@@ -30,8 +30,14 @@ get_label() {  # $1 = label key
   return 0
 }
 
-[ -z "$ROLE" ] && ROLE="$(get_label aegis.role)"
-[ -n "$ROLE" ] || { echo "Aegis: no 'aegis.role' Wazuh label - refusing to patch blind" >&2; exit 1; }
+# role: --role override > Wazuh label (authoritative) > local role file
+# (written by bootstrap's install-time picker) > refuse to patch blind
+SRC="override"
+[ -z "$ROLE" ] && { ROLE="$(get_label aegis.role)"; SRC="wazuh-label"; }
+if [ -z "$ROLE" ] && [ -f /etc/aegis/role ]; then
+  ROLE="$(head -1 /etc/aegis/role | tr -d '[:space:]')"; SRC="local-file"
+fi
+[ -n "$ROLE" ] || { echo "Aegis: no role (no 'aegis.role' Wazuh label, no /etc/aegis/role) - refusing to patch blind" >&2; exit 1; }
 
 # policy from roles.json (python3 for portable JSON parse)
 REBOOT=$(python3 -c "import json,sys;d=json.load(open('$ROLES'));r=d.get('$ROLE');print('' if r is None else r.get('reboot',''))" 2>/dev/null || echo "")
@@ -46,10 +52,10 @@ ARGS=(--group "$ROLE")
 [ "$APPLY" -eq 0 ] && ARGS+=(--dry-run)
 [ "$REBOOT" = "auto" ] && [ "$APPLY" -eq 1 ] && ARGS+=(--allow-reboot)
 
-echo "Aegis: role=$ROLE | reboot=$REBOOT | os=$(uname -s) | apply=$APPLY"
+echo "Aegis: role=$ROLE (via $SRC) | reboot=$REBOOT | os=$(uname -s) | apply=$APPLY"
 mkdir -p "$LOGDIR" 2>/dev/null || true
-printf '{"timestamp":"%s","tool":"aegis","app":"engine","host":"%s","role":"%s","reboot":"%s","apply":%s}\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname)" "$ROLE" "$REBOOT" \
+printf '{"timestamp":"%s","tool":"aegis","app":"engine","host":"%s","role":"%s","source":"%s","reboot":"%s","apply":%s}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname)" "$ROLE" "$SRC" "$REBOOT" \
   "$([ $APPLY -eq 1 ] && echo true || echo false)" >> "$LOGDIR/aegis-app.log" 2>/dev/null || true
 
 exec bash "$PATCH" "${ARGS[@]}"

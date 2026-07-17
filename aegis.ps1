@@ -72,10 +72,20 @@ $result = [ordered]@{
 }
 
 try {
-  # 1. role: explicit override, else the Wazuh label
+  # 1. role: explicit override > Wazuh label (authoritative) > local role file
+  #    (written by bootstrap's install-time picker) > refuse to patch blind
   if ($Role) { $result.role = $Role; $result.source = "override" }
-  else { $result.role = Get-AgentLabel "aegis.role"; $result.source = "wazuh-label" }
-  if (-not $result.role) { throw "no 'aegis.role' Wazuh label found - refusing to patch blind" }
+  else {
+    $result.role = Get-AgentLabel "aegis.role"; $result.source = "wazuh-label"
+    if (-not $result.role) {
+      $roleFile = Join-Path $LogDir "role"
+      if (Test-Path $roleFile) {
+        $v = (Get-Content $roleFile -TotalCount 1 -ErrorAction SilentlyContinue)
+        if ($v) { $result.role = $v.Trim(); $result.source = "local-file" }
+      }
+    }
+  }
+  if (-not $result.role) { throw "no role: no 'aegis.role' Wazuh label and no local role file - refusing to patch blind" }
 
   # 2. policy from roles.json
   $roles = Get-Content $RolesFile -Raw | ConvertFrom-Json
