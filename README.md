@@ -50,7 +50,14 @@ curl -fsSL "https://raw.githubusercontent.com/veteranop/Aegis/$AEGIS_REF/bootstr
 > Public repo — no token needed. **Pin `AEGIS_REF` to a release tag** (not `main`) in production, and the bootstrap verifies `SHA256SUMS` before installing.
 
 ## Running
-- **On-demand:** the Wazuh manager triggers `aegis` via Active Response (`PUT /active-response`).
+- **On-demand:** the Wazuh manager triggers `aegis` via Active Response:
+  ```bash
+  curl -k -H "Authorization: Bearer $TOKEN" -X PUT \
+    "https://<manager>:55000/active-response?agents_list=<id>" \
+    -H "Content-Type: application/json" -d '{"command":"aegis-win0"}'   # or aegis-nix0
+  ```
+  > The API validates the name against `ar.conf`, which appends the timeout suffix — so it's
+  > **`aegis-win0`/`aegis-nix0`**, not the bare `<command>` name from `ossec.conf`.
 - **Scheduled:** a Wazuh `wodle command` in the group's shared config.
 - **Manual/test:** `aegis.ps1 -Role personal` (dry run) — the engine refuses to patch a machine it
   can't identify.
