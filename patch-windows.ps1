@@ -42,7 +42,10 @@ function Write-AegisLog {
 # packaged exe under Program Files\WindowsApps runs reliably in SYSTEM context.
 function Resolve-Winget {
   $candidates = @()
-  $candidates += Get-ChildItem "$env:ProgramFiles\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" `
+  # ProgramW6432 stays "C:\Program Files" even inside a 32-bit (WOW64) process,
+  # where $env:ProgramFiles lies and says "Program Files (x86)"
+  $pf = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+  $candidates += Get-ChildItem "$pf\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" `
         -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | ForEach-Object { $_.FullName }
   $cmd = Get-Command winget.exe -ErrorAction SilentlyContinue
   if ($cmd) { $candidates += $cmd.Source }

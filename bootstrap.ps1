@@ -56,7 +56,12 @@ foreach ($line in $sums) {
 $cmd = Join-Path $agent "active-response\bin\aegis.cmd"
 Set-Content -Path $cmd -Encoding ASCII -Value @'
 @echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0aegis\aegis.ps1" %*
+rem execd is a 32-bit process: plain "powershell" resolves to SysWOW64 (wrong
+rem ProgramFiles, wrong PSModulePath -> no winget, no PSWindowsUpdate).
+rem Force 64-bit PowerShell via the sysnative alias when it exists.
+set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if exist "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe" set "PS=%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe"
+"%PS%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0aegis\aegis.ps1" %*
 '@
 
 # 5. enable remote_commands (the accepted-risk gate) unless told not to
