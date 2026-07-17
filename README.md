@@ -29,6 +29,14 @@ Roles are generic — `personal`, `workstation`, `clinical`, `server`, `mac`, `l
 Aegis rides on the Wazuh agent — install/enroll the agent first, then bootstrap. **Pin a tag/commit**
 in production and verify checksums (`SHA256SUMS`).
 
+**1. On the Wazuh manager (once)** — creates the role groups + labels, the Active-Response command, and
+app-log ingestion. Run **on the server**:
+```bash
+curl -fsSL https://raw.githubusercontent.com/veteranop/Aegis/main/server-setup.sh | sudo bash
+```
+
+**2. On each agent** — bolts Aegis on + enables `remote_commands`:
+
 **Windows** (Administrator):
 ```powershell
 $env:AEGIS_REF='main'

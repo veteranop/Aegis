@@ -38,6 +38,13 @@ while read -r want name; do
   [ "$have" = "$want" ] || { echo "checksum mismatch on $name - refusing to install" >&2; exit 1; }
 done < <(grep -E "$(printf '%s|' aegis.sh roles.json "$PATCH" | sed 's/|$//')" "$DEST/SHA256SUMS" 2>/dev/null || true)
 
+# AR wrapper so the Wazuh manager can invoke the engine (AR runs an executable in bin/)
+cat > "$OSSEC/active-response/bin/aegis" <<'WRAP'
+#!/usr/bin/env bash
+exec "$(dirname "$0")/aegis/aegis.sh" "$@"
+WRAP
+chmod +x "$OSSEC/active-response/bin/aegis"
+
 # enable remote_commands (the accepted-risk gate)
 if [ "$NO_RC" != "1" ]; then
   LIO="$OSSEC/etc/local_internal_options.conf"
