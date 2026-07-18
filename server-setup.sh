@@ -210,22 +210,26 @@ cat > "$new_rules" <<'XML'
 
   <rule id="100103" level="10">
     <if_sid>100101</if_sid>
-    <field name="status">^error$</field>
+    <status>^error$</status>
     <description>Aegis: engine ERROR on $(host) - $(note)</description>
     <group>error,</group>
   </rule>
 
-  <!-- patch runner (aegis-patch.log): actual apply/dry-run results -->
+  <!-- patch runner (aegis-patch.log): actual apply/dry-run results.
+       "status" is a Wazuh-reserved static field - must use the dedicated <status> tag,
+       not <field name="status">, or the ruleset fails to load ("Field 'status' is static").
+       <field> matching is OSMatch (literal/anchored), NOT full regex - "." and "+" are taken
+       literally, so a "match anything" gate needs type="pcre2" to get real wildcard support. -->
   <rule id="100104" level="3">
     <if_sid>100100</if_sid>
-    <field name="group">.+</field>
+    <field name="group" type="pcre2">.+</field>
     <description>Aegis: patch run completed on $(host) - group=$(group) os=$(os) status=$(status)</description>
     <group>patch_run,</group>
   </rule>
 
   <rule id="100105" level="5">
     <if_sid>100104</if_sid>
-    <field name="status">^(ok|success)$</field>
+    <status>^success$</status>
     <field name="dry_run">^false$</field>
     <description>Aegis: patch successfully applied on $(host) - group=$(group) os=$(os)</description>
     <group>success,</group>
@@ -233,7 +237,7 @@ cat > "$new_rules" <<'XML'
 
   <rule id="100106" level="10">
     <if_sid>100104</if_sid>
-    <field name="status">^error$</field>
+    <status>^error$</status>
     <description>Aegis: patch run ERROR on $(host) - group=$(group) os=$(os) (see full log for detail)</description>
     <group>error,</group>
   </rule>
