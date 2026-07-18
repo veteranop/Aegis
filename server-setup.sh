@@ -219,11 +219,14 @@ cat > "$new_rules" <<'XML'
        "status" is a Wazuh-reserved static field - must use the dedicated <status> tag,
        not <field name="status">, or the ruleset fails to load ("Field 'status' is static").
        <field> matching is OSMatch (literal/anchored), NOT full regex - "." and "+" are taken
-       literally, so a "match anything" gate needs type="pcre2" to get real wildcard support. -->
+       literally, so a "match anything" gate needs type="pcre2" to get real wildcard support.
+       The patch log emits "os_family" (windows/linux/macos), NOT "os": Wazuh reserves data.os
+       as an OBJECT (data.os.name, ...), so a plain-string data.os makes the indexer reject the
+       WHOLE alert (mapper_parsing_exception) and no patch/error/escalation alert ever indexes. -->
   <rule id="100104" level="3">
     <if_sid>100100</if_sid>
     <field name="group" type="pcre2">.+</field>
-    <description>Aegis: patch run completed on $(host) - group=$(group) os=$(os) status=$(status)</description>
+    <description>Aegis: patch run completed on $(host) - group=$(group) os=$(os_family) status=$(status)</description>
     <group>patch_run,</group>
   </rule>
 
@@ -231,14 +234,14 @@ cat > "$new_rules" <<'XML'
     <if_sid>100104</if_sid>
     <status>^success$</status>
     <field name="dry_run">^false$</field>
-    <description>Aegis: patch successfully applied on $(host) - group=$(group) os=$(os)</description>
+    <description>Aegis: patch successfully applied on $(host) - group=$(group) os=$(os_family)</description>
     <group>success,</group>
   </rule>
 
   <rule id="100106" level="10">
     <if_sid>100104</if_sid>
     <status>^error$</status>
-    <description>Aegis: patch run ERROR on $(host) - group=$(group) os=$(os) (see full log for detail)</description>
+    <description>Aegis: patch run ERROR on $(host) - group=$(group) os=$(os_family) (see full log for detail)</description>
     <group>error,</group>
   </rule>
 
@@ -284,6 +287,20 @@ if "$OSSEC/bin/wazuh-analysisd" -t 2>/dev/null || "$OSSEC/bin/ossec-analysisd" -
 else
   echo "!! config test FAILED — NOT restarting. Restore from $CONF.aegis.bak.* and review." >&2
   exit 1
+fi
+
+# --- 5. Fleet Patching dashboard (optional, non-fatal) ---
+# Installs the saved-objects bundle into Wazuh Dashboards via the indexer admin cert
+# (no Dashboards password needed). Skipped cleanly if the bundle or cert isn't present;
+# a failure here never blocks manager setup — import the .ndjson from the UI instead.
+DASH_DIR="$(dirname "$0")/integrations/aegis/dashboards"
+if [ -f "$DASH_DIR/install-dashboards.sh" ] && [ -f "$DASH_DIR/aegis-fleet-patching.ndjson" ]; then
+  echo "== installing Fleet Patching dashboard =="
+  if ! bash "$DASH_DIR/install-dashboards.sh" "$DASH_DIR/aegis-fleet-patching.ndjson"; then
+    echo "!! dashboard install failed (non-fatal) — import $DASH_DIR/aegis-fleet-patching.ndjson via Dashboards UI." >&2
+  fi
+else
+  echo "== (no dashboard bundle beside server-setup.sh; skipping dashboard install) =="
 fi
 
 cat <<DONE

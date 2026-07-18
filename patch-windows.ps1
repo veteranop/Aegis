@@ -22,7 +22,7 @@ $ErrorActionPreference = "Stop"
 $start = Get-Date
 $result = [ordered]@{
   timestamp = $start.ToUniversalTime().ToString("o"); tool = "aegis"
-  host = $env:COMPUTERNAME; os = "windows"; group = $Group; dry_run = [bool]$DryRun
+  host = $env:COMPUTERNAME; os_family = "windows"; group = $Group; dry_run = [bool]$DryRun
   apps_updated = @(); apps_excluded = @(); os_updates = 0
   reboot_required = $false; reboot_performed = $false; errors = @(); status = "success"
 }

@@ -63,7 +63,7 @@ else
 fi
 
 DUR=$(( $(date +%s) - START ))
-JSON=$(printf '{"timestamp":"%s","tool":"aegis","host":"%s","os":"linux","mgr":"%s","group":"%s","dry_run":%s,"pkgs_updated":%s,"reboot_required":%s,"reboot_performed":%s,"errors":"%s","duration_sec":%s,"status":"%s"}' \
+JSON=$(printf '{"timestamp":"%s","tool":"aegis","host":"%s","os_family":"linux","mgr":"%s","group":"%s","dry_run":%s,"pkgs_updated":%s,"reboot_required":%s,"reboot_performed":%s,"errors":"%s","duration_sec":%s,"status":"%s"}' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HOST" "${MGR:-unknown}" "$GROUP" \
   "$([ $DRY_RUN -eq 1 ] && echo true || echo false)" "${UPDATED:-0}" \
   "$([ $REBOOT_REQ -eq 1 ] && echo true || echo false)" \

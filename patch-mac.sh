@@ -60,7 +60,7 @@ if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
 fi
 
 DUR=$(( $(date +%s) - START ))
-JSON=$(printf '{"timestamp":"%s","tool":"aegis","host":"%s","os":"macos","group":"%s","dry_run":%s,"apple_updates":%s,"brew_ran":%s,"reboot_required":%s,"errors":"%s","duration_sec":%s,"status":"%s"}' \
+JSON=$(printf '{"timestamp":"%s","tool":"aegis","host":"%s","os_family":"macos","group":"%s","dry_run":%s,"apple_updates":%s,"brew_ran":%s,"reboot_required":%s,"errors":"%s","duration_sec":%s,"status":"%s"}' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HOST" "$GROUP" \
   "$([ $DRY_RUN -eq 1 ] && echo true || echo false)" "${OS_UPDATES:-0}" "${BREW_UPDATES:-0}" \
   "$([ $REBOOT_REQ -eq 1 ] && echo true || echo false)" "$ERRORS" "$DUR" "$STATUS")
