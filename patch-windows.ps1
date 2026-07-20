@@ -13,6 +13,7 @@ param(
   [switch]$DryRun,                              # list only, change nothing
   [switch]$AllowReboot,                         # permit reboot if updates require it
   [switch]$SkipOS,                              # apps only, skip Windows Update
+  [switch]$SkipUserApps,                        # skip the per-user winget pass (SYSTEM-only)
   [string]$ExclusionFile,                       # JSON: { "<group>": { "winget": ["Id",...] } }
   [string]$Group = "personal",
   [string]$LogDir = "$env:ProgramData\Aegis"
@@ -23,7 +24,7 @@ $start = Get-Date
 $result = [ordered]@{
   timestamp = $start.ToUniversalTime().ToString("o"); tool = "aegis"
   host = $env:COMPUTERNAME; os_family = "windows"; group = $Group; dry_run = [bool]$DryRun
-  apps_updated = @(); apps_excluded = @(); os_updates = 0
+  apps_updated = @(); user_apps_updated = @(); apps_excluded = @(); os_updates = 0
   reboot_required = $false; reboot_performed = $false; errors = @(); status = "success"
 }
 
@@ -71,6 +72,41 @@ function Resolve-Winget {
   return $null
 }
 
+# --- user-context winget pass -------------------------------------------------
+# SYSTEM's winget only sees MACHINE-scope packages; per-user installs (proven with
+# ripgrep) are invisible and never patched. Run winget as the logged-on interactive
+# user via a one-shot scheduled task (/it -> interactive token, no password), mirroring
+# patch-mac.sh's `sudo -u $CONSOLE_USER brew`. Returns winget output text, or $null.
+function Invoke-WingetAsUser {
+  $user = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName  # DOMAIN\user, or $null
+  if (-not $user) { return $null }                        # nobody logged on -> nothing to do
+  $tag  = "AegisUserWinget"
+  $work = Join-Path $env:ProgramData "Aegis"              # user-writable (SYSTEM's %TEMP% is NOT)
+  New-Item -ItemType Directory -Force -Path $work | Out-Null
+  $script = Join-Path $work "$tag.cmd"                    # no spaces in path -> no schtasks quoting hell
+  $out    = Join-Path $work "$tag.out"
+  Remove-Item $out -ErrorAction SilentlyContinue
+  # command lives in a .cmd file (sidesteps schtasks nested-quote parsing); winget resolves
+  # from the interactive user's PATH; output goes to a path the USER task can write.
+  @"
+@echo off
+winget upgrade --all --silent --include-unknown --accept-source-agreements --accept-package-agreements --disable-interactivity > "$out" 2>&1
+"@ | Set-Content -Path $script -Encoding ASCII
+  try {
+    schtasks /create /tn $tag /tr $script /sc once /st 00:00 /ru $user /it /f 2>$null | Out-Null
+    schtasks /run /tn $tag 2>$null | Out-Null
+    for ($i = 0; $i -lt 120; $i++) {                       # wait up to ~10 min for completion
+      Start-Sleep -Seconds 5
+      $st = (schtasks /query /tn $tag /fo LIST 2>$null | Select-String "^Status:") -join ""
+      if ((Test-Path $out) -and $st -notmatch "Running") { break }
+    }
+  } finally {
+    schtasks /delete /tn $tag /f 2>$null | Out-Null
+  }
+  if (Test-Path $out) { return (Get-Content $out -Raw -ErrorAction SilentlyContinue) }
+  return $null
+}
+
 try {
   # --- load exclusions for this group ---
   $excluded = @()
@@ -101,6 +137,15 @@ try {
         --disable-interactivity 2>&1 | Tee-Object -Variable wgOut | Out-Null
     # best-effort capture of what moved (winget lacks clean machine output)
     $result.apps_updated = @($wgOut | Select-String -Pattern 'Successfully installed' | ForEach-Object { "$_" })
+
+    # second pass as the logged-on user, to catch per-user installs SYSTEM can't see
+    if (-not $SkipUserApps) {
+      $userOut = Invoke-WingetAsUser
+      if ($userOut) {
+        $result.user_apps_updated = @($userOut -split "`r?`n" |
+          Select-String -Pattern 'Successfully installed' | ForEach-Object { "$_".Trim() })
+      }
+    }
   }
 
   # --- OS: PSWindowsUpdate ---
