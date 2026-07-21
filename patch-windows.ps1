@@ -24,7 +24,7 @@ $start = Get-Date
 $result = [ordered]@{
   timestamp = $start.ToUniversalTime().ToString("o"); tool = "aegis"
   host = $env:COMPUTERNAME; os_family = "windows"; group = $Group; dry_run = [bool]$DryRun
-  engine = "diag1"   # build marker — bump on release; proves self-update landed
+  engine = "diag2-dllpath"   # build marker — bump on release; proves self-update landed
   apps_updated = @(); user_apps_updated = @(); apps_excluded = @(); os_updates = 0
   reboot_required = $false; reboot_performed = $false; errors = @(); notes = @(); status = "success"
 }
@@ -58,6 +58,17 @@ function Write-AegisLog {
 $script:WingetDiag = @()
 function Resolve-Winget {
   $candidates = @()
+  # winget.exe (MSIX) needs its framework DLLs (VCLibs, UI.Xaml) on the loader path to run
+  # standalone under SYSTEM; without them a raw exec fails with 0xC0000135 (STATUS_DLL_NOT_
+  # FOUND). Prepend the framework package dirs so SYSTEM can run winget directly (SYSTEM
+  # already has machine-scope rights — no elevation trick).
+  foreach ($fw in @('Microsoft.VCLibs.140.00.UWPDesktop','Microsoft.UI.Xaml.2.8','Microsoft.UI.Xaml.2.7','Microsoft.VCLibs.140.00')) {
+    try {
+      $p = Get-AppxPackage -AllUsers $fw -ErrorAction SilentlyContinue |
+           Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending | Select-Object -First 1
+      if ($p -and $p.InstallLocation) { $env:PATH = "$($p.InstallLocation);$env:PATH"; $script:WingetDiag += "dll+=$($p.Name)" }
+    } catch { }
+  }
   # A: Appx InstallLocation (WindowsApps is ACL-locked; Get-ChildItem gets access-denied)
   try {
     $pkgs = @(Get-AppxPackage -AllUsers Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue)
@@ -101,6 +112,7 @@ public static class AegisNative {
   [DllImport("userenv.dll", SetLastError=true)] public static extern bool DestroyEnvironmentBlock(IntPtr env);
   [DllImport("kernel32.dll", SetLastError=true)] public static extern uint WaitForSingleObject(IntPtr h, uint ms);
   [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr h);
+  [DllImport("advapi32.dll", SetLastError=true)] public static extern bool GetTokenInformation(IntPtr token, int cls, IntPtr info, int len, out int retLen);
   [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
   public static extern bool CreateProcessAsUser(IntPtr token, string app, string cmd, IntPtr pa, IntPtr ta,
     bool inherit, uint flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
