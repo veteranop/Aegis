@@ -75,41 +75,68 @@ function Resolve-Winget {
 # --- user-context winget pass -------------------------------------------------
 # SYSTEM's winget only sees MACHINE-scope packages; per-user installs (proven with
 # ripgrep) are invisible and never patched. Run winget as the logged-on interactive
-# user via a one-shot scheduled task (/it -> interactive token, no password), mirroring
-# patch-mac.sh's `sudo -u $CONSOLE_USER brew`. Returns winget output text, or $null.
+# user by impersonating their token: WTSQueryUserToken (needs SYSTEM/SeTcbPrivilege,
+# which is exactly the Wazuh execd/AR context) -> CreateProcessAsUser into their
+# session. No scheduled task, no password. Returns the winget output text, or $null.
+$AegisNativeSrc = @'
+using System;
+using System.Runtime.InteropServices;
+public static class AegisNative {
+  [DllImport("kernel32.dll")] public static extern uint WTSGetActiveConsoleSessionId();
+  [DllImport("wtsapi32.dll", SetLastError=true)] public static extern bool WTSQueryUserToken(uint SessionId, out IntPtr phToken);
+  [DllImport("advapi32.dll", SetLastError=true)] public static extern bool DuplicateTokenEx(IntPtr h, uint access, IntPtr attr, int imp, int type, out IntPtr phNew);
+  [DllImport("userenv.dll", SetLastError=true)] public static extern bool CreateEnvironmentBlock(out IntPtr env, IntPtr token, bool inherit);
+  [DllImport("userenv.dll", SetLastError=true)] public static extern bool DestroyEnvironmentBlock(IntPtr env);
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern uint WaitForSingleObject(IntPtr h, uint ms);
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr h);
+  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  public static extern bool CreateProcessAsUser(IntPtr token, string app, string cmd, IntPtr pa, IntPtr ta,
+    bool inherit, uint flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+  [StructLayout(LayoutKind.Sequential)] public struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public uint pid, tid; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct STARTUPINFO {
+    public int cb; public string reserved, desktop, title;
+    public int x, y, xsize, ysize, xchars, ychars, fill, flags; public short show, cbr2;
+    public IntPtr reserved2, stdin, stdout, stderr; }
+  // Launch `cmdline` in the active console user's session. Returns true if the process
+  // started and exited within timeoutMs. Throws nothing the caller can't catch.
+  public static bool RunAsActiveUser(string cmdline, string cwd, uint timeoutMs) {
+    IntPtr tok, dup = IntPtr.Zero, env = IntPtr.Zero;
+    uint sid = WTSGetActiveConsoleSessionId();
+    if (sid == 0xFFFFFFFF || !WTSQueryUserToken(sid, out tok)) return false;
+    try {
+      if (!DuplicateTokenEx(tok, 0x10000000u, IntPtr.Zero, 2, 1, out dup)) return false; // MAXIMUM_ALLOWED, SecurityImpersonation, TokenPrimary
+      CreateEnvironmentBlock(out env, dup, false);
+      var si = new STARTUPINFO(); si.cb = Marshal.SizeOf(typeof(STARTUPINFO)); si.desktop = "winsta0\\default";
+      PROCESS_INFORMATION pi;
+      uint flags = 0x00000400u | 0x08000000u; // CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW
+      if (!CreateProcessAsUser(dup, null, cmdline, IntPtr.Zero, IntPtr.Zero, false, flags, env, cwd, ref si, out pi)) return false;
+      WaitForSingleObject(pi.hProcess, timeoutMs);
+      CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+      return true;
+    } finally {
+      if (env != IntPtr.Zero) DestroyEnvironmentBlock(env);
+      if (dup != IntPtr.Zero) CloseHandle(dup);
+      CloseHandle(tok);
+    }
+  }
+}
+'@
+
 function Invoke-WingetAsUser {
-  # BEST-EFFORT: a failure here must NEVER fail the whole patch run (the SYSTEM->user
-  # handoff is finicky). Everything is wrapped so it returns $null on any error.
+  # BEST-EFFORT: a failure here must NEVER fail the whole patch run.
   try {
-    $user = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName  # DOMAIN\user, or $null
-    if (-not $user) { return $null }                       # nobody logged on -> nothing to do
-    # full path: the Wazuh execd/SYSTEM context can have a stripped PATH, so a bare
-    # `schtasks` may not resolve. Resolve it explicitly.
-    $sch = Join-Path $env:SystemRoot "System32\schtasks.exe"
-    if (-not (Test-Path $sch)) { $sch = "schtasks" }
-    $tag  = "AegisUserWinget"
-    $work = Join-Path $env:ProgramData "Aegis"             # user-writable (SYSTEM's %TEMP% is NOT)
+    $work = Join-Path $env:ProgramData "Aegis"             # readable/writable by the user process
     New-Item -ItemType Directory -Force -Path $work | Out-Null
-    $script = Join-Path $work "$tag.cmd"                   # no spaces in path -> no schtasks quoting hell
-    $out    = Join-Path $work "$tag.out"
+    $script = Join-Path $work "AegisUserWinget.cmd"
+    $out    = Join-Path $work "AegisUserWinget.out"
     Remove-Item $out -ErrorAction SilentlyContinue
-    # command lives in a .cmd file (sidesteps schtasks nested-quote parsing); winget resolves
-    # from the interactive user's PATH; output goes to a path the USER task can write.
     @"
 @echo off
 winget upgrade --all --silent --include-unknown --accept-source-agreements --accept-package-agreements --disable-interactivity > "$out" 2>&1
 "@ | Set-Content -Path $script -Encoding ASCII
-    try {
-      & $sch /create /tn $tag /tr $script /sc once /st 00:00 /ru $user /it /f 2>$null | Out-Null
-      & $sch /run /tn $tag 2>$null | Out-Null
-      for ($i = 0; $i -lt 120; $i++) {                     # wait up to ~10 min for completion
-        Start-Sleep -Seconds 5
-        $st = (& $sch /query /tn $tag /fo LIST 2>$null | Select-String "^Status:") -join ""
-        if ((Test-Path $out) -and $st -notmatch "Running") { break }
-      }
-    } finally {
-      & $sch /delete /tn $tag /f 2>$null | Out-Null
-    }
+    if (-not ('AegisNative' -as [type])) { Add-Type -TypeDefinition $AegisNativeSrc -Language CSharp }
+    # 10-min cap; runs cmd.exe /c the .cmd in the console user's session
+    [void][AegisNative]::RunAsActiveUser("cmd.exe /c `"$script`"", $work, 600000)
     if (Test-Path $out) { return (Get-Content $out -Raw -ErrorAction SilentlyContinue) }
     return $null
   } catch {
