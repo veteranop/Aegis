@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Aegis — Windows patch runner. Apps via winget, OS via PSWindowsUpdate.
+  Aegis — Windows patch runner. Apps via winget, OS via the Windows Update Agent API.
   SYSTEM-context safe. Pins protect line-of-business apps. Writes a JSON audit
   line the Wazuh agent ships. Never reboots unless -AllowReboot.
 
@@ -25,7 +25,7 @@ $start = Get-Date
 $result = [ordered]@{
   timestamp = $start.ToUniversalTime().ToString("o"); tool = "aegis"
   host = $env:COMPUTERNAME; os_family = "windows"; group = $Group; dry_run = [bool]$DryRun
-  engine = "iter4-userpass-os"   # build marker — bump on release; proves self-update landed
+  engine = "iter5-nativeWU"   # build marker — bump on release; proves self-update landed
   apps_updated = @(); user_apps_updated = @(); apps_excluded = @(); os_updates = 0
   reboot_required = $false; reboot_performed = $false; errors = @(); notes = @(); status = "success"
 }
@@ -215,29 +215,23 @@ try {
     }
   }
 
-  # --- OS: PSWindowsUpdate (non-fatal; non-interactive SYSTEM context) ---
+  # --- OS: native Windows Update Agent COM API. Built into Windows (no PSGallery module),
+  # no ShouldContinue prompt, works under SYSTEM. Non-fatal. ---
   if (-not $SkipOS) {
    try {
-    if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
-      if (-not $DryRun) {
-        Set-PSRepository PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-        Install-Module PSWindowsUpdate -Force -Scope AllUsers -ErrorAction Stop
-      }
-    }
-    Import-Module PSWindowsUpdate -ErrorAction SilentlyContinue
-    if (-not (Get-Command Get-WindowsUpdate -ErrorAction SilentlyContinue)) {
-      # dry-run must not install software; note the gap instead of dying on a
-      # missing cmdlet (a CommandNotFound is terminating under EAP=Stop)
-      $result.notes += "PSWindowsUpdate unavailable - OS update check skipped"
-      Write-Warning "Aegis: PSWindowsUpdate unavailable - OS update check skipped"
-    } elseif ($DryRun) {
-      $pending = Get-WindowsUpdate -ErrorAction SilentlyContinue
-      Write-Output "DRY RUN - pending OS updates: $($pending.Count)"
-      $result.os_updates = @($pending).Count
-    } else {
-      $applied = Install-WindowsUpdate -AcceptAll -IgnoreReboot -Confirm:$false -ErrorAction SilentlyContinue
-      $result.os_updates = @($applied).Count
-      $result.reboot_required = [bool](Get-WURebootStatus -Silent -ErrorAction SilentlyContinue)
+    $wu = New-Object -ComObject Microsoft.Update.Session
+    $found = $wu.CreateUpdateSearcher().Search("IsInstalled=0 and Type='Software' and IsHidden=0").Updates
+    $coll = New-Object -ComObject Microsoft.Update.UpdateColl
+    foreach ($u in $found) { if (-not $u.EulaAccepted) { try { $u.AcceptEula() } catch { } }; [void]$coll.Add($u) }
+    if ($DryRun) {
+      Write-Output "DRY RUN - pending OS updates: $($coll.Count)"
+      $result.os_updates = $coll.Count
+    } elseif ($coll.Count -gt 0) {
+      $dl = $wu.CreateUpdateDownloader(); $dl.Updates = $coll; [void]$dl.Download()
+      $inst = $wu.CreateUpdateInstaller(); $inst.Updates = $coll
+      $ir = $inst.Install()
+      $result.os_updates = $coll.Count
+      $result.reboot_required = [bool]$ir.RebootRequired
     }
    } catch { $result.notes += "OS patch step error (non-fatal): $($_.Exception.Message.Substring(0,[Math]::Min(120,$_.Exception.Message.Length)))" }
   }
