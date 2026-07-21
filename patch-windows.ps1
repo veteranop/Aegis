@@ -13,6 +13,7 @@ param(
   [switch]$DryRun,                              # list only, change nothing
   [switch]$AllowReboot,                         # permit reboot if updates require it
   [switch]$SkipOS,                              # apps only, skip Windows Update
+  [switch]$SkipUserApps,                        # skip the per-user winget pass (SYSTEM-only)
   [string]$ExclusionFile,                       # JSON: { "<group>": { "winget": ["Id",...] } }
   [string]$Group = "personal",
   [string]$LogDir = "$env:ProgramData\Aegis"
@@ -23,7 +24,7 @@ $start = Get-Date
 $result = [ordered]@{
   timestamp = $start.ToUniversalTime().ToString("o"); tool = "aegis"
   host = $env:COMPUTERNAME; os_family = "windows"; group = $Group; dry_run = [bool]$DryRun
-  apps_updated = @(); apps_excluded = @(); os_updates = 0
+  apps_updated = @(); user_apps_updated = @(); apps_excluded = @(); os_updates = 0
   reboot_required = $false; reboot_performed = $false; errors = @(); status = "success"
 }
 
@@ -71,6 +72,81 @@ function Resolve-Winget {
   return $null
 }
 
+# --- user-context winget pass -------------------------------------------------
+# SYSTEM's winget only sees MACHINE-scope packages; per-user installs (proven with
+# ripgrep) are invisible and never patched. Run winget as the logged-on interactive
+# user by impersonating their token: WTSQueryUserToken (needs SYSTEM/SeTcbPrivilege,
+# which is exactly the Wazuh execd/AR context) -> CreateProcessAsUser into their
+# session. No scheduled task, no password. Returns the winget output text, or $null.
+$AegisNativeSrc = @'
+using System;
+using System.Runtime.InteropServices;
+public static class AegisNative {
+  [DllImport("kernel32.dll")] public static extern uint WTSGetActiveConsoleSessionId();
+  [DllImport("wtsapi32.dll", SetLastError=true)] public static extern bool WTSQueryUserToken(uint SessionId, out IntPtr phToken);
+  [DllImport("advapi32.dll", SetLastError=true)] public static extern bool DuplicateTokenEx(IntPtr h, uint access, IntPtr attr, int imp, int type, out IntPtr phNew);
+  [DllImport("userenv.dll", SetLastError=true)] public static extern bool CreateEnvironmentBlock(out IntPtr env, IntPtr token, bool inherit);
+  [DllImport("userenv.dll", SetLastError=true)] public static extern bool DestroyEnvironmentBlock(IntPtr env);
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern uint WaitForSingleObject(IntPtr h, uint ms);
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr h);
+  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  public static extern bool CreateProcessAsUser(IntPtr token, string app, string cmd, IntPtr pa, IntPtr ta,
+    bool inherit, uint flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+  [StructLayout(LayoutKind.Sequential)] public struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public uint pid, tid; }
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct STARTUPINFO {
+    public int cb; public string reserved, desktop, title;
+    public int x, y, xsize, ysize, xchars, ychars, fill, flags; public short show, cbr2;
+    public IntPtr reserved2, stdin, stdout, stderr; }
+  // Launch `cmdline` in the active console user's session. Returns true if the process
+  // started and exited within timeoutMs. Throws nothing the caller can't catch.
+  public static bool RunAsActiveUser(string cmdline, string cwd, uint timeoutMs) {
+    IntPtr tok, dup = IntPtr.Zero, env = IntPtr.Zero;
+    uint sid = WTSGetActiveConsoleSessionId();
+    if (sid == 0xFFFFFFFF || !WTSQueryUserToken(sid, out tok)) return false;
+    try {
+      if (!DuplicateTokenEx(tok, 0x10000000u, IntPtr.Zero, 2, 1, out dup)) return false; // MAXIMUM_ALLOWED, SecurityImpersonation, TokenPrimary
+      CreateEnvironmentBlock(out env, dup, false);
+      var si = new STARTUPINFO(); si.cb = Marshal.SizeOf(typeof(STARTUPINFO)); si.desktop = "winsta0\\default";
+      PROCESS_INFORMATION pi;
+      uint flags = 0x00000400u | 0x08000000u; // CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW
+      if (!CreateProcessAsUser(dup, null, cmdline, IntPtr.Zero, IntPtr.Zero, false, flags, env, cwd, ref si, out pi)) return false;
+      WaitForSingleObject(pi.hProcess, timeoutMs);
+      CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+      return true;
+    } finally {
+      if (env != IntPtr.Zero) DestroyEnvironmentBlock(env);
+      if (dup != IntPtr.Zero) CloseHandle(dup);
+      CloseHandle(tok);
+    }
+  }
+}
+'@
+
+function Invoke-WingetAsUser {
+  # BEST-EFFORT: a failure here must NEVER fail the whole patch run.
+  try {
+    $work = Join-Path $env:ProgramData "Aegis"             # readable/writable by the user process
+    New-Item -ItemType Directory -Force -Path $work | Out-Null
+    $script = Join-Path $work "AegisUserWinget.cmd"
+    $out    = Join-Path $work "AegisUserWinget.out"
+    Remove-Item $out -ErrorAction SilentlyContinue
+    # --scope user: only USER-scope installs. Machine-scope apps are the (elevated)
+    # SYSTEM pass's job; touching them from the un-elevated user session triggers a
+    # UAC prompt that would stall an unattended client run. Scoping avoids that.
+    @"
+@echo off
+winget upgrade --all --scope user --silent --include-unknown --accept-source-agreements --accept-package-agreements --disable-interactivity > "$out" 2>&1
+"@ | Set-Content -Path $script -Encoding ASCII
+    if (-not ('AegisNative' -as [type])) { Add-Type -TypeDefinition $AegisNativeSrc -Language CSharp }
+    # 10-min cap; runs cmd.exe /c the .cmd in the console user's session
+    [void][AegisNative]::RunAsActiveUser("cmd.exe /c `"$script`"", $work, 600000)
+    if (Test-Path $out) { return (Get-Content $out -Raw -ErrorAction SilentlyContinue) }
+    return $null
+  } catch {
+    return $null   # best-effort: never let the user-pass fail the core patch run
+  }
+}
+
 try {
   # --- load exclusions for this group ---
   $excluded = @()
@@ -101,6 +177,15 @@ try {
         --disable-interactivity 2>&1 | Tee-Object -Variable wgOut | Out-Null
     # best-effort capture of what moved (winget lacks clean machine output)
     $result.apps_updated = @($wgOut | Select-String -Pattern 'Successfully installed' | ForEach-Object { "$_" })
+
+    # second pass as the logged-on user, to catch per-user installs SYSTEM can't see
+    if (-not $SkipUserApps) {
+      $userOut = Invoke-WingetAsUser
+      if ($userOut) {
+        $result.user_apps_updated = @($userOut -split "`r?`n" |
+          Select-String -Pattern 'Successfully installed' | ForEach-Object { "$_".Trim() })
+      }
+    }
   }
 
   # --- OS: PSWindowsUpdate ---
