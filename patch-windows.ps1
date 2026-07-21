@@ -20,11 +20,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ConfirmPreference = "None"   # non-interactive SYSTEM/AR context: never ShouldContinue-prompt
 $start = Get-Date
 $result = [ordered]@{
   timestamp = $start.ToUniversalTime().ToString("o"); tool = "aegis"
   host = $env:COMPUTERNAME; os_family = "windows"; group = $Group; dry_run = [bool]$DryRun
-  engine = "diag2-dllpath"   # build marker — bump on release; proves self-update landed
+  engine = "iter4-userpass-os"   # build marker — bump on release; proves self-update landed
   apps_updated = @(); user_apps_updated = @(); apps_excluded = @(); os_updates = 0
   reboot_required = $false; reboot_performed = $false; errors = @(); notes = @(); status = "success"
 }
@@ -180,11 +181,11 @@ try {
   }
   $result.apps_excluded = $excluded
 
-  # --- apps: winget (NON-FATAL: if unresolved, skip apps but STILL do Windows Update) ---
+  # --- machine-scope apps: SYSTEM winget (NON-FATAL if it can't resolve/run) ---
   $winget = Resolve-Winget
   $result.winget_diag = $script:WingetDiag   # TEMP diagnostic: how resolution went
   if (-not $winget) {
-    $result.notes += "winget/App Installer not resolvable in SYSTEM context - app patching skipped; OS patching continues"
+    $result.notes += "SYSTEM winget unavailable - machine-scope apps skipped (user-scope + OS still run)"
   }
   else {
     # pin exclusions so --all can never touch LOB apps (idempotent, persistent)
@@ -193,31 +194,30 @@ try {
         & $winget pin add --id $id --exact --accept-source-agreements 2>$null | Out-Null
       }
     }
-
     if ($DryRun) {
       $list = & $winget upgrade --include-unknown --accept-source-agreements 2>$null
-      $joined = ($list | Out-String)
-      Write-Output "DRY RUN - winget would upgrade:`n$joined"
+      Write-Output "DRY RUN - winget would upgrade:`n$($list | Out-String)"
     } else {
       & $winget upgrade --all --silent --include-unknown `
           --accept-source-agreements --accept-package-agreements `
           --disable-interactivity 2>&1 | Tee-Object -Variable wgOut | Out-Null
-      # best-effort capture of what moved (winget lacks clean machine output)
       $result.apps_updated = @($wgOut | Select-String -Pattern 'Successfully installed' | ForEach-Object { "$_" })
-
-      # second pass as the logged-on user, to catch per-user installs SYSTEM can't see
-      if (-not $SkipUserApps) {
-        $userOut = Invoke-WingetAsUser
-        if ($userOut) {
-          $result.user_apps_updated = @($userOut -split "`r?`n" |
-            Select-String -Pattern 'Successfully installed' | ForEach-Object { "$_".Trim() })
-        }
-      }
     }
   }
 
-  # --- OS: PSWindowsUpdate ---
+  # --- per-user apps: runs INDEPENDENTLY of the SYSTEM pass (winget works in the user's
+  # session even when SYSTEM can't resolve/run it), so this must not be gated on $winget. ---
+  if (-not $DryRun -and -not $SkipUserApps) {
+    $userOut = Invoke-WingetAsUser
+    if ($userOut) {
+      $result.user_apps_updated = @($userOut -split "`r?`n" |
+        Select-String -Pattern 'Successfully installed' | ForEach-Object { "$_".Trim() })
+    }
+  }
+
+  # --- OS: PSWindowsUpdate (non-fatal; non-interactive SYSTEM context) ---
   if (-not $SkipOS) {
+   try {
     if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
       if (-not $DryRun) {
         Set-PSRepository PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
@@ -228,17 +228,18 @@ try {
     if (-not (Get-Command Get-WindowsUpdate -ErrorAction SilentlyContinue)) {
       # dry-run must not install software; note the gap instead of dying on a
       # missing cmdlet (a CommandNotFound is terminating under EAP=Stop)
-      $result.errors += "PSWindowsUpdate unavailable - OS update check skipped (install with -Scope AllUsers)"
+      $result.notes += "PSWindowsUpdate unavailable - OS update check skipped"
       Write-Warning "Aegis: PSWindowsUpdate unavailable - OS update check skipped"
     } elseif ($DryRun) {
       $pending = Get-WindowsUpdate -ErrorAction SilentlyContinue
       Write-Output "DRY RUN - pending OS updates: $($pending.Count)"
       $result.os_updates = @($pending).Count
     } else {
-      $applied = Install-WindowsUpdate -AcceptAll -IgnoreReboot -ErrorAction SilentlyContinue
+      $applied = Install-WindowsUpdate -AcceptAll -IgnoreReboot -Confirm:$false -ErrorAction SilentlyContinue
       $result.os_updates = @($applied).Count
       $result.reboot_required = [bool](Get-WURebootStatus -Silent -ErrorAction SilentlyContinue)
     }
+   } catch { $result.notes += "OS patch step error (non-fatal): $($_.Exception.Message.Substring(0,[Math]::Min(120,$_.Exception.Message.Length)))" }
   }
 
   # --- reboot policy ---
