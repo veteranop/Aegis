@@ -78,33 +78,43 @@ function Resolve-Winget {
 # user via a one-shot scheduled task (/it -> interactive token, no password), mirroring
 # patch-mac.sh's `sudo -u $CONSOLE_USER brew`. Returns winget output text, or $null.
 function Invoke-WingetAsUser {
-  $user = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName  # DOMAIN\user, or $null
-  if (-not $user) { return $null }                        # nobody logged on -> nothing to do
-  $tag  = "AegisUserWinget"
-  $work = Join-Path $env:ProgramData "Aegis"              # user-writable (SYSTEM's %TEMP% is NOT)
-  New-Item -ItemType Directory -Force -Path $work | Out-Null
-  $script = Join-Path $work "$tag.cmd"                    # no spaces in path -> no schtasks quoting hell
-  $out    = Join-Path $work "$tag.out"
-  Remove-Item $out -ErrorAction SilentlyContinue
-  # command lives in a .cmd file (sidesteps schtasks nested-quote parsing); winget resolves
-  # from the interactive user's PATH; output goes to a path the USER task can write.
-  @"
+  # BEST-EFFORT: a failure here must NEVER fail the whole patch run (the SYSTEM->user
+  # handoff is finicky). Everything is wrapped so it returns $null on any error.
+  try {
+    $user = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName  # DOMAIN\user, or $null
+    if (-not $user) { return $null }                       # nobody logged on -> nothing to do
+    # full path: the Wazuh execd/SYSTEM context can have a stripped PATH, so a bare
+    # `schtasks` may not resolve. Resolve it explicitly.
+    $sch = Join-Path $env:SystemRoot "System32\schtasks.exe"
+    if (-not (Test-Path $sch)) { $sch = "schtasks" }
+    $tag  = "AegisUserWinget"
+    $work = Join-Path $env:ProgramData "Aegis"             # user-writable (SYSTEM's %TEMP% is NOT)
+    New-Item -ItemType Directory -Force -Path $work | Out-Null
+    $script = Join-Path $work "$tag.cmd"                   # no spaces in path -> no schtasks quoting hell
+    $out    = Join-Path $work "$tag.out"
+    Remove-Item $out -ErrorAction SilentlyContinue
+    # command lives in a .cmd file (sidesteps schtasks nested-quote parsing); winget resolves
+    # from the interactive user's PATH; output goes to a path the USER task can write.
+    @"
 @echo off
 winget upgrade --all --silent --include-unknown --accept-source-agreements --accept-package-agreements --disable-interactivity > "$out" 2>&1
 "@ | Set-Content -Path $script -Encoding ASCII
-  try {
-    schtasks /create /tn $tag /tr $script /sc once /st 00:00 /ru $user /it /f 2>$null | Out-Null
-    schtasks /run /tn $tag 2>$null | Out-Null
-    for ($i = 0; $i -lt 120; $i++) {                       # wait up to ~10 min for completion
-      Start-Sleep -Seconds 5
-      $st = (schtasks /query /tn $tag /fo LIST 2>$null | Select-String "^Status:") -join ""
-      if ((Test-Path $out) -and $st -notmatch "Running") { break }
+    try {
+      & $sch /create /tn $tag /tr $script /sc once /st 00:00 /ru $user /it /f 2>$null | Out-Null
+      & $sch /run /tn $tag 2>$null | Out-Null
+      for ($i = 0; $i -lt 120; $i++) {                     # wait up to ~10 min for completion
+        Start-Sleep -Seconds 5
+        $st = (& $sch /query /tn $tag /fo LIST 2>$null | Select-String "^Status:") -join ""
+        if ((Test-Path $out) -and $st -notmatch "Running") { break }
+      }
+    } finally {
+      & $sch /delete /tn $tag /f 2>$null | Out-Null
     }
-  } finally {
-    schtasks /delete /tn $tag /f 2>$null | Out-Null
+    if (Test-Path $out) { return (Get-Content $out -Raw -ErrorAction SilentlyContinue) }
+    return $null
+  } catch {
+    return $null   # best-effort: never let the user-pass fail the core patch run
   }
-  if (Test-Path $out) { return (Get-Content $out -Raw -ErrorAction SilentlyContinue) }
-  return $null
 }
 
 try {
