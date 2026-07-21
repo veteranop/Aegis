@@ -61,6 +61,26 @@ exec "$(dirname "$0")/aegis.d/aegis.sh" --apply "$@"
 WRAP
 chmod +x "$OSSEC/active-response/bin/aegis-apply"
 
+# self-update wrapper + script — lets the manager push engine updates fleet-wide via
+# the `aegis-nix-update` AR command. Re-pulls the engine + re-runs bootstrap, no restart.
+cat > "$OSSEC/active-response/bin/aegis-update" <<'WRAP'
+#!/usr/bin/env bash
+exec "$(dirname "$0")/aegis.d/aegis-update.sh" "$@"
+WRAP
+chmod +x "$OSSEC/active-response/bin/aegis-update"
+cat > "$DEST/aegis-update.sh" <<'UPD'
+#!/usr/bin/env bash
+# Aegis self-update: re-pull the pinned engine from GitHub + re-run bootstrap, tracking
+# the repo/ref recorded at install (/etc/aegis/ref). Runs with AEGIS_NO_RESTART=1.
+set -e
+REPO=veteranop/Aegis; REF=main; TOKEN=
+[ -f /etc/aegis/ref ] && . /etc/aegis/ref 2>/dev/null || true
+AUTH=(); [ -n "${TOKEN:-}" ] && AUTH=(-H "Authorization: token $TOKEN")
+curl -fsSL ${AUTH[@]+"${AUTH[@]}"} "https://raw.githubusercontent.com/$REPO/$REF/bootstrap.sh" \
+  | AEGIS_REPO="$REPO" AEGIS_REF="$REF" AEGIS_TOKEN="${TOKEN:-}" AEGIS_NO_RESTART=1 bash
+UPD
+chmod +x "$DEST/aegis-update.sh"
+
 # enable remote_commands (the accepted-risk gate)
 if [ "$NO_RC" != "1" ]; then
   LIO="$OSSEC/etc/local_internal_options.conf"
@@ -72,6 +92,10 @@ if [ "$NO_RC" != "1" ]; then
 fi
 
 mkdir -p /var/log/aegis
+
+# record the repo/ref this box tracks so aegis-update re-pulls the same channel
+mkdir -p /etc/aegis
+{ echo "REPO=$REPO"; echo "REF=$REF"; [ -n "${TOKEN:-}" ] && echo "TOKEN=$TOKEN"; } > /etc/aegis/ref
 
 # role picker -> live from the start. Engine resolves: Wazuh label (authoritative)
 # > /etc/aegis/role (this file) > refuse. AEGIS_ROLE env pre-selects; the menu
@@ -100,9 +124,12 @@ if [ -n "$SEL" ]; then
   echo "Aegis role -> '$SEL' (local file; manager label overrides)"
 fi
 
-# restart the agent
-if command -v systemctl >/dev/null 2>&1; then systemctl restart wazuh-agent 2>/dev/null || true
-else "$OSSEC/bin/wazuh-control" restart 2>/dev/null || "$OSSEC/bin/ossec-control" restart 2>/dev/null || true; fi
+# restart the agent — skipped on self-update (AEGIS_NO_RESTART=1) so an AR-triggered
+# update doesn't bounce the agent running it.
+if [ "${AEGIS_NO_RESTART:-0}" != "1" ]; then
+  if command -v systemctl >/dev/null 2>&1; then systemctl restart wazuh-agent 2>/dev/null || true
+  else "$OSSEC/bin/wazuh-control" restart 2>/dev/null || "$OSSEC/bin/ossec-control" restart 2>/dev/null || true; fi
+fi
 
 echo "Aegis installed -> $DEST (ref: $REF). remote_commands: $([ "$NO_RC" = 1 ] && echo false || echo true)."
 echo "Next (manager side): set the group's aegis.role label + add the aegis-app.log <localfile>."
