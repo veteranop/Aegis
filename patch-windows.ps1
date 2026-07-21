@@ -24,7 +24,7 @@ $start = Get-Date
 $result = [ordered]@{
   timestamp = $start.ToUniversalTime().ToString("o"); tool = "aegis"
   host = $env:COMPUTERNAME; os_family = "windows"; group = $Group; dry_run = [bool]$DryRun
-  engine = "2026.07.21-fleetsync"   # build marker — bump on release; proves self-update landed
+  engine = "diag1"   # build marker — bump on release; proves self-update landed
   apps_updated = @(); user_apps_updated = @(); apps_excluded = @(); os_updates = 0
   reboot_required = $false; reboot_performed = $false; errors = @(); notes = @(); status = "success"
 }
@@ -55,30 +55,31 @@ function Write-AegisLog {
 # the systemprofile's WindowsApps reparse-point alias, which exists but is NOT
 # executable by SYSTEM ("The file cannot be accessed by the system"). Only the real
 # packaged exe under Program Files\WindowsApps runs reliably in SYSTEM context.
+$script:WingetDiag = @()
 function Resolve-Winget {
   $candidates = @()
-  # Most reliable under SYSTEM: ask Appx for the package InstallLocation. C:\Program
-  # Files\WindowsApps is ACL-locked (owned by TrustedInstaller) and Get-ChildItem on it
-  # returns "access denied" even for SYSTEM — so the glob below finds nothing on many
-  # machines even though winget IS installed. Get-AppxPackage returns the path without
-  # enumerating the folder.
+  # A: Appx InstallLocation (WindowsApps is ACL-locked; Get-ChildItem gets access-denied)
   try {
-    Get-AppxPackage -AllUsers Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
-      Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending |
-      ForEach-Object { if ($_.InstallLocation) { $candidates += (Join-Path $_.InstallLocation 'winget.exe') } }
-  } catch { }
-  # ProgramW6432 stays "C:\Program Files" even inside a 32-bit (WOW64) process,
-  # where $env:ProgramFiles lies and says "Program Files (x86)"
+    $pkgs = @(Get-AppxPackage -AllUsers Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue)
+    $script:WingetDiag += "appx=$($pkgs.Count)"
+    foreach ($p in ($pkgs | Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending)) {
+      if ($p.InstallLocation) { $candidates += (Join-Path $p.InstallLocation 'winget.exe'); $script:WingetDiag += "loc=$($p.InstallLocation)|v=$($p.Version)" }
+    }
+  } catch { $script:WingetDiag += "appxERR=$($_.Exception.Message)" }
+  # B: glob under Program Files
   $pf = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
-  $candidates += Get-ChildItem "$pf\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" `
-        -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | ForEach-Object { $_.FullName }
+  $glob = @(Get-ChildItem "$pf\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+  $script:WingetDiag += "glob=$($glob.Count)"; $candidates += $glob
+  # C: PATH
   $cmd = Get-Command winget.exe -ErrorAction SilentlyContinue
-  if ($cmd) { $candidates += $cmd.Source }
-  foreach ($c in $candidates) {
+  if ($cmd) { $candidates += $cmd.Source; $script:WingetDiag += "path=$($cmd.Source)" }
+  # test each candidate with --version, recording exit/exception
+  foreach ($c in ($candidates | Select-Object -Unique)) {
     try {
-      $null = & $c --version 2>$null
+      $out = (& $c --version 2>&1 | Out-String).Trim()
+      $script:WingetDiag += "TRY[$c]=exit:$LASTEXITCODE|$($out.Substring(0,[Math]::Min(60,$out.Length)))"
       if ($LASTEXITCODE -eq 0) { return $c }
-    } catch { }
+    } catch { $script:WingetDiag += "TRY[$c]=EXC:$($_.Exception.Message.Substring(0,[Math]::Min(80,$_.Exception.Message.Length)))" }
   }
   return $null
 }
@@ -169,6 +170,7 @@ try {
 
   # --- apps: winget (NON-FATAL: if unresolved, skip apps but STILL do Windows Update) ---
   $winget = Resolve-Winget
+  $result.winget_diag = $script:WingetDiag   # TEMP diagnostic: how resolution went
   if (-not $winget) {
     $result.notes += "winget/App Installer not resolvable in SYSTEM context - app patching skipped; OS patching continues"
   }
