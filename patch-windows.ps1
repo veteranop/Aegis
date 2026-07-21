@@ -25,7 +25,7 @@ $result = [ordered]@{
   timestamp = $start.ToUniversalTime().ToString("o"); tool = "aegis"
   host = $env:COMPUTERNAME; os_family = "windows"; group = $Group; dry_run = [bool]$DryRun
   apps_updated = @(); user_apps_updated = @(); apps_excluded = @(); os_updates = 0
-  reboot_required = $false; reboot_performed = $false; errors = @(); status = "success"
+  reboot_required = $false; reboot_performed = $false; errors = @(); notes = @(); status = "success"
 }
 
 function Write-AegisLog {
@@ -56,6 +56,16 @@ function Write-AegisLog {
 # packaged exe under Program Files\WindowsApps runs reliably in SYSTEM context.
 function Resolve-Winget {
   $candidates = @()
+  # Most reliable under SYSTEM: ask Appx for the package InstallLocation. C:\Program
+  # Files\WindowsApps is ACL-locked (owned by TrustedInstaller) and Get-ChildItem on it
+  # returns "access denied" even for SYSTEM — so the glob below finds nothing on many
+  # machines even though winget IS installed. Get-AppxPackage returns the path without
+  # enumerating the folder.
+  try {
+    Get-AppxPackage -AllUsers Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+      Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending |
+      ForEach-Object { if ($_.InstallLocation) { $candidates += (Join-Path $_.InstallLocation 'winget.exe') } }
+  } catch { }
   # ProgramW6432 stays "C:\Program Files" even inside a 32-bit (WOW64) process,
   # where $env:ProgramFiles lies and says "Program Files (x86)"
   $pf = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
@@ -156,34 +166,37 @@ try {
   }
   $result.apps_excluded = $excluded
 
-  # --- apps: winget ---
+  # --- apps: winget (NON-FATAL: if unresolved, skip apps but STILL do Windows Update) ---
   $winget = Resolve-Winget
-  if (-not $winget) { throw "winget.exe not found (App Installer missing?)" }
-
-  # pin exclusions so --all can never touch LOB apps (idempotent, persistent)
-  foreach ($id in $excluded) {
-    if (-not $DryRun) {
-      & $winget pin add --id $id --exact --accept-source-agreements 2>$null | Out-Null
-    }
+  if (-not $winget) {
+    $result.notes += "winget/App Installer not resolvable in SYSTEM context - app patching skipped; OS patching continues"
   }
+  else {
+    # pin exclusions so --all can never touch LOB apps (idempotent, persistent)
+    foreach ($id in $excluded) {
+      if (-not $DryRun) {
+        & $winget pin add --id $id --exact --accept-source-agreements 2>$null | Out-Null
+      }
+    }
 
-  if ($DryRun) {
-    $list = & $winget upgrade --include-unknown --accept-source-agreements 2>$null
-    $joined = ($list | Out-String)
-    Write-Output "DRY RUN - winget would upgrade:`n$joined"
-  } else {
-    & $winget upgrade --all --silent --include-unknown `
-        --accept-source-agreements --accept-package-agreements `
-        --disable-interactivity 2>&1 | Tee-Object -Variable wgOut | Out-Null
-    # best-effort capture of what moved (winget lacks clean machine output)
-    $result.apps_updated = @($wgOut | Select-String -Pattern 'Successfully installed' | ForEach-Object { "$_" })
+    if ($DryRun) {
+      $list = & $winget upgrade --include-unknown --accept-source-agreements 2>$null
+      $joined = ($list | Out-String)
+      Write-Output "DRY RUN - winget would upgrade:`n$joined"
+    } else {
+      & $winget upgrade --all --silent --include-unknown `
+          --accept-source-agreements --accept-package-agreements `
+          --disable-interactivity 2>&1 | Tee-Object -Variable wgOut | Out-Null
+      # best-effort capture of what moved (winget lacks clean machine output)
+      $result.apps_updated = @($wgOut | Select-String -Pattern 'Successfully installed' | ForEach-Object { "$_" })
 
-    # second pass as the logged-on user, to catch per-user installs SYSTEM can't see
-    if (-not $SkipUserApps) {
-      $userOut = Invoke-WingetAsUser
-      if ($userOut) {
-        $result.user_apps_updated = @($userOut -split "`r?`n" |
-          Select-String -Pattern 'Successfully installed' | ForEach-Object { "$_".Trim() })
+      # second pass as the logged-on user, to catch per-user installs SYSTEM can't see
+      if (-not $SkipUserApps) {
+        $userOut = Invoke-WingetAsUser
+        if ($userOut) {
+          $result.user_apps_updated = @($userOut -split "`r?`n" |
+            Select-String -Pattern 'Successfully installed' | ForEach-Object { "$_".Trim() })
+        }
       }
     }
   }

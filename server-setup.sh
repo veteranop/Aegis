@@ -114,6 +114,47 @@ else
   echo "== Aegis APPLY commands already present, skipping =="
 fi
 
+# --- 1c. SELF-UPDATE commands — lets the manager push engine updates fleet-wide.
+# The agent re-pulls the pinned engine from GitHub + re-runs bootstrap (no restart). ---
+if ! grep -q "<name>aegis-win-update</name>" "$CONF"; then
+  echo "== adding Aegis SELF-UPDATE commands to ossec.conf =="
+  AR_BLOCK=$(cat <<'XML'
+
+  <!-- Aegis self-update (added by server-setup) — re-pulls the engine + re-runs bootstrap -->
+  <command>
+    <name>aegis-win-update</name>
+    <executable>aegis-update.cmd</executable>
+    <timeout_allowed>no</timeout_allowed>
+  </command>
+  <command>
+    <name>aegis-nix-update</name>
+    <executable>aegis-update</executable>
+    <timeout_allowed>no</timeout_allowed>
+  </command>
+  <active-response>
+    <disabled>no</disabled>
+    <command>aegis-win-update</command>
+    <location>local</location>
+  </active-response>
+  <active-response>
+    <disabled>no</disabled>
+    <command>aegis-nix-update</command>
+    <location>local</location>
+  </active-response>
+XML
+)
+  python3 - "$CONF" "$AR_BLOCK" <<'PY'
+import sys
+conf, block = sys.argv[1], sys.argv[2]
+s = open(conf, encoding="utf-8").read()
+idx = s.rfind("</ossec_config>")
+s = s[:idx] + block + "\n" + s[idx:]
+open(conf, "w", encoding="utf-8").write(s)
+PY
+else
+  echo "== Aegis SELF-UPDATE commands already present, skipping =="
+fi
+
 # --- 2. role groups + shared agent.conf (label + app-log/patch-log localfiles) ---
 # Regenerated every run (fully generated content, no manual edits expected) so that
 # adding a new localfile block here also lands on groups that were already configured

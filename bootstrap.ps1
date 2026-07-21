@@ -76,6 +76,31 @@ if exist "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe" set "PS=
 "%PS%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0aegis\aegis.ps1" -Apply %*
 '@
 
+# 4c. self-update wrapper — lets the manager push engine updates fleet-wide via the
+# `aegis-win-update` AR command. It re-pulls the pinned engine and re-runs bootstrap
+# with AEGIS_NO_RESTART so it never bounces the agent that's running it.
+$cmdUpdate = Join-Path $agent "active-response\bin\aegis-update.cmd"
+Set-Content -Path $cmdUpdate -Encoding ASCII -Value @'
+@echo off
+set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if exist "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe" set "PS=%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe"
+"%PS%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0aegis\aegis-update.ps1" %*
+'@
+Set-Content -Path (Join-Path $dest "aegis-update.ps1") -Encoding ASCII -Value @'
+# Aegis self-update: re-pull the pinned engine from GitHub and re-run bootstrap,
+# tracking the repo/ref recorded at install (%ProgramData%\Aegis\ref). No agent restart.
+$ErrorActionPreference = "Stop"
+$cfg = @{}
+Get-Content "$env:ProgramData\Aegis\ref" -ErrorAction SilentlyContinue | ForEach-Object {
+  if ($_ -match "^\s*(\w+)\s*=\s*(.+?)\s*$") { $cfg[$Matches[1]] = $Matches[2] }
+}
+$repo = if ($cfg.repo) { $cfg.repo } else { "veteranop/Aegis" }
+$ref  = if ($cfg.ref)  { $cfg.ref }  else { "main" }
+$hdr = @{}; if ($cfg.token) { $hdr["Authorization"] = "token $($cfg.token)" }
+$env:AEGIS_REF = $ref; $env:AEGIS_NO_RESTART = "1"
+Invoke-RestMethod "https://raw.githubusercontent.com/$repo/$ref/bootstrap.ps1" -Headers $hdr | Invoke-Expression
+'@
+
 # 5. enable remote_commands (the accepted-risk gate) unless told not to
 if (-not $NoRemoteCommands) {
     $lio = Join-Path $agent "local_internal_options.conf"
@@ -88,6 +113,11 @@ if (-not $NoRemoteCommands) {
 
 # 6. app-log dir (manager's shared config adds the <localfile> to ship it to Wazuh)
 New-Item -ItemType Directory -Force -Path "$env:ProgramData\Aegis" | Out-Null
+
+# 6a. record the repo/ref this box tracks, so aegis-update re-pulls the same channel.
+# Track a BRANCH (e.g. main) for push-button fleet updates; pin a tag/SHA to freeze.
+$refLines = @("repo=$Repo", "ref=$Ref"); if ($Token) { $refLines += "token=$Token" }
+Set-Content -Path "$env:ProgramData\Aegis\ref" -Encoding ASCII -Value $refLines
 
 # 6b. role picker -> live from the start. The engine resolves: Wazuh label
 # (authoritative, set per group on the manager) > this local file > refuse.
@@ -107,9 +137,12 @@ if ($Role) {
   Write-Host "Aegis role -> '$Role' (local file; manager label overrides)"
 }
 
-# 7. restart the agent to pick up config
-foreach ($svc in @("WazuhSvc", "Wazuh", "OssecSvc")) {
-    if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { Restart-Service -Name $svc -Force; break }
+# 7. restart the agent to pick up config — skipped on self-update (AEGIS_NO_RESTART=1)
+# so an AR-triggered update doesn't bounce the agent that's running it.
+if ($env:AEGIS_NO_RESTART -ne "1") {
+    foreach ($svc in @("WazuhSvc", "Wazuh", "OssecSvc")) {
+        if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { Restart-Service -Name $svc -Force; break }
+    }
 }
 
 Write-Host "Aegis installed -> $dest (ref: $Ref). remote_commands: $([bool](-not $NoRemoteCommands)). "
