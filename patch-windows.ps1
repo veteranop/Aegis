@@ -130,9 +130,12 @@ function Invoke-WingetAsUser {
     $script = Join-Path $work "AegisUserWinget.cmd"
     $out    = Join-Path $work "AegisUserWinget.out"
     Remove-Item $out -ErrorAction SilentlyContinue
+    # --scope user: only USER-scope installs. Machine-scope apps are the (elevated)
+    # SYSTEM pass's job; touching them from the un-elevated user session triggers a
+    # UAC prompt that would stall an unattended client run. Scoping avoids that.
     @"
 @echo off
-winget upgrade --all --silent --include-unknown --accept-source-agreements --accept-package-agreements --disable-interactivity > "$out" 2>&1
+winget upgrade --all --scope user --silent --include-unknown --accept-source-agreements --accept-package-agreements --disable-interactivity > "$out" 2>&1
 "@ | Set-Content -Path $script -Encoding ASCII
     if (-not ('AegisNative' -as [type])) { Add-Type -TypeDefinition $AegisNativeSrc -Language CSharp }
     # 10-min cap; runs cmd.exe /c the .cmd in the console user's session
