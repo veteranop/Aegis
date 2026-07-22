@@ -25,7 +25,7 @@ $start = Get-Date
 $result = [ordered]@{
   timestamp = $start.ToUniversalTime().ToString("o"); tool = "aegis"
   host = $env:COMPUTERNAME; os_family = "windows"; group = $Group; dry_run = [bool]$DryRun
-  engine = "diag-postrepair"
+  engine = "2026.07.21"   # engine build (bump on release; visible per-machine in the outcome)
   apps_updated = @(); user_apps_updated = @(); apps_excluded = @(); os_updates = 0
   reboot_required = $false; reboot_performed = $false; errors = @(); notes = @(); status = "success"
 }
@@ -56,21 +56,23 @@ function Write-AegisLog {
 # the systemprofile's WindowsApps reparse-point alias, which exists but is NOT
 # executable by SYSTEM ("The file cannot be accessed by the system"). Only the real
 # packaged exe under Program Files\WindowsApps runs reliably in SYSTEM context.
-$script:WingetDiag = @()
 function Resolve-Winget {
+  # Find a winget.exe SYSTEM can actually run. WindowsApps is ACL-locked (Get-ChildItem is
+  # access-denied under SYSTEM), so resolve via the Appx InstallLocation, then CONFIRM it
+  # runs via --version — on some images the packaged exe can't run standalone under SYSTEM
+  # (0xC0000135, MSIX package-graph); those return $null and machine-scope is skipped.
   $candidates = @()
   try {
-    $pk = @(Get-AppxPackage -AllUsers Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending)
-    $script:WingetDiag += "appx=$($pk.Count):" + (($pk | ForEach-Object { $_.Version }) -join ',')
-    foreach ($p in $pk) { if ($p.InstallLocation) { $candidates += (Join-Path $p.InstallLocation 'winget.exe') } }
-  } catch { $script:WingetDiag += "appxERR" }
+    Get-AppxPackage -AllUsers Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue |
+      Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending |
+      ForEach-Object { if ($_.InstallLocation) { $candidates += (Join-Path $_.InstallLocation 'winget.exe') } }
+  } catch { }
   $pf = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
   $candidates += @(Get-ChildItem "$pf\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
   $cmd = Get-Command winget.exe -ErrorAction SilentlyContinue
   if ($cmd) { $candidates += $cmd.Source }
   foreach ($c in ($candidates | Select-Object -Unique)) {
-    try { $v = (& $c --version 2>&1 | Out-String).Trim(); $script:WingetDiag += "exit=$LASTEXITCODE|$($v.Substring(0,[Math]::Min(30,$v.Length)))"; if ($LASTEXITCODE -eq 0) { return $c } }
-    catch { $script:WingetDiag += "EXC=$($_.Exception.Message.Substring(0,[Math]::Min(50,$_.Exception.Message.Length)))" }
+    try { $null = & $c --version 2>$null; if ($LASTEXITCODE -eq 0) { return $c } } catch { }
   }
   return $null
 }
@@ -162,7 +164,6 @@ try {
 
   # --- machine-scope apps: SYSTEM winget (NON-FATAL if it can't resolve/run) ---
   $winget = Resolve-Winget
-  $result.winget_diag = $script:WingetDiag   # TEMP: current winget state on this box
   if (-not $winget) {
     $result.notes += "SYSTEM winget unavailable - machine-scope apps skipped (user-scope + OS still run)"
   }
