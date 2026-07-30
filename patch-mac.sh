@@ -40,9 +40,25 @@ CASKS_TO_MANAGE=(
 CONSOLE_USER=$(stat -f%Su /dev/console 2>/dev/null)
 note_err(){ STATUS="error"; ERRORS="${ERRORS}${ERRORS:+; }$1"; }
 
+# --- emit safety ---
+# Every value below is interpolated into a ONE-LINE JSON record that Wazuh's
+# logcollector reads with <log_format>json</log_format>. A stray newline or quote
+# makes the line unparseable and logcollector drops it AT THE AGENT — the run then
+# completes having reported nothing, which is indistinguishable from never running.
+# num()  guarantees an integer field; jstr() escapes a string field.
+num(){ case "${1:-}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "$1" ;; esac; }
+jstr(){ printf '%s' "${1:-}" | tr '\n\r\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
 # --- Apple software updates ---
-AVAIL=$(softwareupdate -l 2>/dev/null || true)
-OS_UPDATES=$(printf '%s\n' "$AVAIL" | grep -c -E '^\s*\* ' || echo 0)
+# 2>&1: softwareupdate writes its banner and "No new software available." to
+# stderr, so discarding stderr left $AVAIL routinely empty.
+AVAIL=$(softwareupdate -l 2>&1 || true)
+# grep -c prints "0" AND exits 1 when nothing matches, so a `|| echo 0` fallback
+# appends a SECOND zero -> the literal bytes "0\n0". That both corrupted the JSON
+# record and made `[ "$OS_UPDATES" -gt 0 ]` a bash error, silently skipping the
+# install below. Use `|| true` and sanitize. [[:space:]] replaces the GNU-only \s,
+# which BSD/macOS grep does not honour (so this never matched on a Mac).
+OS_UPDATES=$(num "$(printf '%s\n' "$AVAIL" | grep -c -E '^[[:space:]]*\* ' || true)")
 printf '%s\n' "$AVAIL" | grep -qiE 'restart|shut down' && REBOOT_REQ=1
 
 if [ "$DRY_RUN" -eq 1 ]; then
@@ -91,8 +107,8 @@ fi
 
 DUR=$(( $(date +%s) - START ))
 JSON=$(printf '{"timestamp":"%s","tool":"aegis","host":"%s","os_family":"macos","group":"%s","dry_run":%s,"apple_updates":%s,"brew_ran":%s,"cask_ran":%s,"casks_adopted":%s,"reboot_required":%s,"errors":"%s","duration_sec":%s,"status":"%s"}' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$HOST" "$GROUP" \
-  "$([ $DRY_RUN -eq 1 ] && echo true || echo false)" "${OS_UPDATES:-0}" "${BREW_UPDATES:-0}" "${CASK_UPDATES:-0}" "${CASKS_ADOPTED:-0}" \
-  "$([ $REBOOT_REQ -eq 1 ] && echo true || echo false)" "$ERRORS" "$DUR" "$STATUS")
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(jstr "$HOST")" "$(jstr "$GROUP")" \
+  "$([ $DRY_RUN -eq 1 ] && echo true || echo false)" "$(num "$OS_UPDATES")" "$(num "$BREW_UPDATES")" "$(num "$CASK_UPDATES")" "$(num "$CASKS_ADOPTED")" \
+  "$([ $REBOOT_REQ -eq 1 ] && echo true || echo false)" "$(jstr "$ERRORS")" "$(num "$DUR")" "$(jstr "$STATUS")")
 
 echo "$JSON" >> "$LOG"; echo "$JSON"
