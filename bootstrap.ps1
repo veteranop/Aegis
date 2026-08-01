@@ -147,5 +147,37 @@ if ($env:AEGIS_NO_RESTART -ne "1") {
     }
 }
 
+# 7b. SSH ops-key provisioning (AEGIS_SSH_KEY=0 to skip): hosts get the public key
+# (OpenSSH server + dedicated admin user); the private key stays on the ops side.
+if ($env:AEGIS_SSH_KEY -ne "0") {
+    $opsUser = if ($env:AEGIS_OPS_USER) { $env:AEGIS_OPS_USER } else { "veteranop-ops" }
+    $keyUrl = "https://raw.githubusercontent.com/$Repo/$Ref/keys/aegis-ops.pub"
+    try {
+        $pubKey = (Invoke-WebRequest -Uri $keyUrl -UseBasicParsing -TimeoutSec 20).Content.Trim()
+        if ($pubKey) {
+            Add-WindowsCapability -Online -Name "OpenSSH.Server~~~~0.0.1.0" -ErrorAction SilentlyContinue | Out-Null
+            if (-not (Get-Service -Name sshd -ErrorAction SilentlyContinue)) {
+                Add-WindowsCapability -Online -Name "OpenSSH.Server~~~~0.0.1.0" | Out-Null
+            }
+            Start-Service sshd -ErrorAction SilentlyContinue
+            Set-Service -Name sshd -StartupType Automatic -ErrorAction SilentlyContinue
+            if (-not (Get-LocalUser -Name $opsUser -ErrorAction SilentlyContinue)) {
+                $pass = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+                New-LocalUser -Name $opsUser -Password (ConvertTo-SecureString $pass -AsPlainText -Force) -PasswordNeverExpires -ErrorAction SilentlyContinue | Out-Null
+                Add-LocalGroupMember -Group "Administrators" -Member $opsUser -ErrorAction SilentlyContinue
+            }
+            $sshDir = "C:\ProgramData\ssh"
+            if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Path $sshDir -Force | Out-Null }
+            $keyFile = Join-Path $sshDir "administrators_authorized_keys"
+            $existing = if (Test-Path $keyFile) { Get-Content $keyFile -Raw -ErrorAction SilentlyContinue } else { "" }
+            if ($existing -notmatch [regex]::Escape($pubKey)) {
+                Add-Content -Path $keyFile -Value $pubKey -Encoding ASCII
+                icacls $keyFile /inheritance:r /grant "Administrators:F" "SYSTEM:F" | Out-Null
+            }
+            Write-Host "Aegis ssh ops key provisioned for $opsUser (sshd: $((Get-Service sshd -ErrorAction SilentlyContinue).Status))"
+        }
+    } catch { Write-Host "Aegis ssh key provisioning skipped: $_" }
+}
+
 Write-Host "Aegis installed -> $dest (ref: $Ref). remote_commands: $([bool](-not $NoRemoteCommands)). "
 Write-Host "Next (manager side): set the group's aegis.role label + add the aegis-app.log <localfile>."

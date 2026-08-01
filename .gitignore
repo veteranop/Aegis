@@ -10,3 +10,4 @@ secrets/
 *.conf
 *.log
 .DS_Store
+keys/aegis-ops
