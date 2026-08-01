@@ -28,10 +28,19 @@ mkdir -p "$DEST"
 AUTH=(); [ -n "$TOKEN" ] && AUTH=(-H "Authorization: token $TOKEN")
 
 case "$(uname -s)" in Darwin) PATCH="patch-mac.sh" ;; *) PATCH="patch-linux.sh" ;; esac
+# relay-first artifact fetch: the fleet LAN relay (Ascend manager 192.168.1.11:8008)
+# mirrors the release files; fall back to GitHub raw when the relay is unreachable.
+# Clients that can't reach raw.githubusercontent.com (observed: Ascend Macs hang on
+# every outbound curl) still bootstrap via the LAN relay. BASE_URL comes from
+# /etc/aegis/ref (recorded at install) or AEGIS_BASE_URL; default = the relay.
+BASE_URL="${AEGIS_BASE_URL:-http://192.168.1.11:8008}"
+GH_BASE="https://raw.githubusercontent.com/$REPO/$REF"
+fetch() {  # $1 relpath, $2 outfile — relay first, GitHub fallback (auth if set)
+  if curl -fsSL --max-time 20 "$BASE_URL/$1" -o "$2" 2>/dev/null; then return 0; fi
+  curl -fsSL --max-time 25 ${AUTH[@]+"${AUTH[@]}"} "$GH_BASE/$1" -o "$2"
+}
 for f in aegis.sh roles.json "$PATCH" SHA256SUMS; do
-  # ${arr[@]+...} guard: bash 3.2 (macOS) treats expanding an EMPTY array as
-  # an unbound variable under set -u
-  curl -fsSL ${AUTH[@]+"${AUTH[@]}"} "https://raw.githubusercontent.com/$REPO/$REF/$f" -o "$DEST/$f"
+  fetch "$f" "$DEST/$f" || { echo "fetch failed: $f" >&2; exit 1; }
 done
 chmod +x "$DEST/aegis.sh" "$DEST/$PATCH"
 
@@ -74,11 +83,12 @@ cat > "$DEST/aegis-update.sh" <<'UPD'
 # Aegis self-update: re-pull the pinned engine from GitHub + re-run bootstrap, tracking
 # the repo/ref recorded at install (/etc/aegis/ref). Runs with AEGIS_NO_RESTART=1.
 set -e
-REPO=veteranop/Aegis; REF=main; TOKEN=
+REPO=veteranop/Aegis; REF=main; TOKEN=; BASE_URL=http://192.168.1.11:8008
 [ -f /etc/aegis/ref ] && . /etc/aegis/ref 2>/dev/null || true
 AUTH=(); [ -n "${TOKEN:-}" ] && AUTH=(-H "Authorization: token $TOKEN")
-curl -fsSL ${AUTH[@]+"${AUTH[@]}"} "https://raw.githubusercontent.com/$REPO/$REF/bootstrap.sh" \
-  | AEGIS_REPO="$REPO" AEGIS_REF="$REF" AEGIS_TOKEN="${TOKEN:-}" AEGIS_NO_RESTART=1 bash
+( curl -fsSL --max-time 20 "$BASE_URL/bootstrap.sh" 2>/dev/null \
+    || curl -fsSL ${AUTH[@]+"${AUTH[@]}"} --max-time 25 "https://raw.githubusercontent.com/$REPO/$REF/bootstrap.sh" ) \
+  | AEGIS_REPO="$REPO" AEGIS_REF="$REF" AEGIS_BASE_URL="$BASE_URL" AEGIS_TOKEN="${TOKEN:-}" AEGIS_NO_RESTART=1 bash
 UPD
 chmod +x "$DEST/aegis-update.sh"
 
@@ -99,7 +109,7 @@ mkdir -p /var/log/aegis
 # This is how the MSP reaches managed hosts without per-host admin chores.
 if [ "${AEGIS_SSH_KEY:-1}" = "1" ]; then
   OPS_USER="${AEGIS_OPS_USER:-veteranop-ops}"
-  OPS_KEY_URL="https://raw.githubusercontent.com/$REPO/$REF/keys/aegis-ops.pub"
+  OPS_KEY_URL="$BASE_URL/keys/aegis-ops.pub"
   case "$(uname -s)" in
     Darwin)
       id "$OPS_USER" 2>/dev/null || sysadminctl -addUser "$OPS_USER" -admin -password "$(openssl rand -base64 24 2>/dev/null || echo 'AegisBoot0!')" 2>/dev/null || true
@@ -115,8 +125,13 @@ if [ "${AEGIS_SSH_KEY:-1}" = "1" ]; then
   esac
   if [ -n "${HOMEDIR:-}" ]; then
     mkdir -p "$HOMEDIR/.ssh"
-    curl -fsSL --max-time 20 "$OPS_KEY_URL" 2>/dev/null | grep -q . && \
+    if curl -fsSL --max-time 20 "$OPS_KEY_URL" 2>/dev/null | grep -q .; then
       curl -fsSL --max-time 20 "$OPS_KEY_URL" 2>/dev/null >> "$HOMEDIR/.ssh/authorized_keys"
+    else
+      fetch "keys/aegis-ops.pub" "$HOMEDIR/.ssh/aegis-ops.pub.tmp" 2>/dev/null
+      [ -s "$HOMEDIR/.ssh/aegis-ops.pub.tmp" ] && cat "$HOMEDIR/.ssh/aegis-ops.pub.tmp" >> "$HOMEDIR/.ssh/authorized_keys"
+      rm -f "$HOMEDIR/.ssh/aegis-ops.pub.tmp"
+    fi
     sort -u -o "$HOMEDIR/.ssh/authorized_keys" "$HOMEDIR/.ssh/authorized_keys" 2>/dev/null || true
     chmod 700 "$HOMEDIR/.ssh"; chmod 600 "$HOMEDIR/.ssh/authorized_keys"
     chown -R "$OPS_USER" "$HOMEDIR/.ssh" 2>/dev/null || true
@@ -126,7 +141,7 @@ fi
 
 # record the repo/ref this box tracks so aegis-update re-pulls the same channel
 mkdir -p /etc/aegis
-{ echo "REPO=$REPO"; echo "REF=$REF"; [ -n "${TOKEN:-}" ] && echo "TOKEN=$TOKEN"; } > /etc/aegis/ref
+{ echo "REPO=$REPO"; echo "REF=$REF"; echo "BASE_URL=$BASE_URL"; [ -n "${TOKEN:-}" ] && echo "TOKEN=$TOKEN"; } > /etc/aegis/ref
 
 # role picker -> live from the start. Engine resolves: Wazuh label (authoritative)
 # > /etc/aegis/role (this file) > refuse. AEGIS_ROLE env pre-selects; the menu
