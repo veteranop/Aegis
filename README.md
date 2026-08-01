@@ -94,7 +94,7 @@ role* lives only in your Wazuh manager, never here.
 | `patch-mac.sh` | `softwareupdate` + Homebrew formulae + cask **adopt** pass |
 | `patch-linux.sh` | apt / dnf |
 | `bootstrap.ps1` / `bootstrap.sh` | one‑time installer (bolts onto an existing Wazuh agent) |
-| `server-setup.sh` | one‑time manager setup (role groups, Active‑Response commands, log ingestion) |
+| `server-setup.sh` | one‑time manager setup (role groups, Active‑Response commands, the `ar.conf` API gate, agent‑side command defs, log ingestion) |
 
 ## Install
 Aegis rides on the Wazuh agent — install/enroll the agent first, then bootstrap. **Pin a tag/commit**
@@ -106,7 +106,9 @@ app‑log ingestion. Run **on the server**:
 curl -fsSL https://raw.githubusercontent.com/veteranop/Aegis/main/server-setup.sh | sudo bash
 ```
 
-**2. On each agent** — bolts Aegis on + enables `remote_commands`:
+**2. On each agent** — bolts Aegis on + flips the agent's remote-command master switch
+(`wazuh_command.remote_commands`, shipped default **off** — the flip is what lets the manager
+trigger the engine):
 
 **Windows** (Administrator):
 ```powershell
@@ -139,8 +141,11 @@ always win once assigned and any local-file box is visible in your SIEM.
     "https://<manager>:55000/active-response?agents_list=<id>" \
     -H "Content-Type: application/json" -d '{"command":"aegis-win0"}'   # or aegis-nix0
   ```
-  > The API validates the name against `ar.conf`, which appends the timeout suffix — so it's
+  > The API validates the name against `ar.conf`, which uses legacy `-0`-suffixed names — so it's
   > **`aegis-win0`/`aegis-nix0`**, not the bare `<command>` name from `ossec.conf`.
+  > `server-setup.sh` creates these `ar.conf` entries (plus the agent-side `-0` command defs).
+  > **Upgrading an existing manager?** Re-run `server-setup.sh` — earlier versions never created
+  > the `ar.conf` entries, so every API send fails with error 1652 until they're added.
 - **Live patching:** the dry-run commands above are the safe default. To actually patch, fire the
   separate apply commands — **`aegis-win-apply0`** / **`aegis-nix-apply0`** — which run the engine
   with `-Apply`/`--apply`. A live run installs updates and **may reboot** per the role's policy.
@@ -159,9 +164,12 @@ console surfaces the latest one as each machine's **Last patch** result.
 
 ## Security model
 - **No fleet data in this repo.** Identity comes from Wazuh labels; roles are generic.
-- **`remote_commands` is the accepted‑risk gate.** The Wazuh‑triggered model makes the **manager a
-  command‑execution root over the fleet** — treat it as a crown‑jewel host, harden its access, and
-  monitor the Aegis app‑log in your SIEM.
+- **The manager is a command‑execution root over the fleet — treat it as a crown‑jewel host.**
+  Three gates protect the AR path: the API **bearer token** (auth), the manager's **`ar.conf`**
+  command allowlist (what the API will accept — only the commands listed there, `-0` names),
+  and each agent's **`wazuh_command.remote_commands`** master switch (flipped on by the
+  bootstrap; shipped default off). Harden the manager's access and monitor the Aegis app‑log
+  in your SIEM.
 - **Least privilege by run.** The user pass runs in the *user's* context (no elevation), machine/OS
   patching in the elevated SYSTEM/root pass — neither does more than its layer needs.
 - **Pinned, checksum‑verified installs.** Pin `AEGIS_REF` to a release tag; the bootstrap verifies

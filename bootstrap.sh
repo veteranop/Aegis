@@ -2,7 +2,8 @@
 # Aegis bootstrap (Linux/macOS) — one-time installer. Run with sudo.
 #
 # Bolts Aegis onto an existing Wazuh agent: downloads the pinned engine into the
-# agent's active-response/bin, enables remote_commands, makes the box AR-ready.
+# agent's active-response/bin, flips the agent's remote-command master switch
+# (wazuh_command.remote_commands — shipped default OFF), makes the box AR-ready.
 # Reads NO client data — role/policy come from the Wazuh label at run time.
 #
 # One-liner (private repo -> export a token first):
@@ -81,7 +82,7 @@ curl -fsSL ${AUTH[@]+"${AUTH[@]}"} "https://raw.githubusercontent.com/$REPO/$REF
 UPD
 chmod +x "$DEST/aegis-update.sh"
 
-# enable remote_commands (the accepted-risk gate)
+# flip the agent's remote-command master switch (wazuh_command.remote_commands; default OFF)
 if [ "$NO_RC" != "1" ]; then
   LIO="$OSSEC/etc/local_internal_options.conf"
   touch "$LIO"

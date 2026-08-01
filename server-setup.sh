@@ -7,6 +7,12 @@
 #     <localfile> so the Aegis app-log is shipped + monitored in Wazuh
 #   - adds the Active-Response commands (aegis-win / aegis-nix) to ossec.conf so the
 #     manager can trigger patching (PUT /active-response)
+#   - adds the ar.conf entries (aegis-win0 / aegis-nix0 / ...) — REQUIRED: the Wazuh
+#     API validates PUT /active-response command names against etc/shared/ar.conf,
+#     NOT the ossec.conf <command> blocks. Without them every API send fails 1652
+#   - adds the -0-suffixed <command> defs to each group's agent.conf so the agent's
+#     execd can resolve the AR executables (and flips nothing agent-side — the
+#     bootstrap handles the wazuh_command.remote_commands internal option)
 #   - a commented scheduled-wodle template per group (opt-in)
 #
 # Idempotent. Backs up ossec.conf. Then assign agents to a role group and trigger.
@@ -155,6 +161,36 @@ else
   echo "== Aegis SELF-UPDATE commands already present, skipping =="
 fi
 
+# --- 1d. ar.conf entries — REQUIRED for the API AR gate ---
+# The Wazuh API validates PUT /active-response command names against
+# $SHARED/ar.conf (framework wazuh/core/active_response.py -> get_commands()).
+# ar.conf uses legacy -0-suffixed names; the ossec.conf <command> blocks above
+# are NOT what the API checks. Without these lines every API send fails with
+# error 1652 ("The command used is not defined in the configuration") at
+# message-build time, before anything reaches the agent. The framework reads
+# ar.conf per-send, so the API path needs no daemon reload; the manager restart
+# in step 4 also reloads it for alert-triggered Active Response.
+AR_CONF="$SHARED/ar.conf"
+if [ ! -f "$AR_CONF" ]; then
+  echo "== creating $AR_CONF (no existing ar.conf found)"
+  : > "$AR_CONF"
+fi
+cp -a "$AR_CONF" "$AR_CONF.aegis.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+for _ar in \
+  "aegis-win0 - aegis.cmd - 0" \
+  "aegis-nix0 - aegis - 0" \
+  "aegis-win-apply0 - aegis-apply.cmd - 0" \
+  "aegis-nix-apply0 - aegis-apply - 0" \
+  "aegis-win-update0 - aegis-update.cmd - 0" \
+  "aegis-nix-update0 - aegis-update - 0"; do
+  _name="${_ar%% -*}"
+  if ! grep -q "^${_name} " "$AR_CONF"; then
+    echo "$_ar" >> "$AR_CONF"
+    echo "== ar.conf: added $_name"
+  fi
+done
+chown "$OWNER:$OWNER" "$AR_CONF" 2>/dev/null || true
+
 # --- 2. role groups + shared agent.conf (label + app-log/patch-log localfiles) ---
 # Regenerated every run (fully generated content, no manual edits expected) so that
 # adding a new localfile block here also lands on groups that were already configured
@@ -188,6 +224,34 @@ for role in "${ROLES[@]}"; do
     <location>/var/log/aegis/aegis-patch.log</location>
     <log_format>json</log_format>
   </localfile>
+
+  <!-- AR command defs (-0 names MUST match the manager's ar.conf: the API
+       validates against ar.conf, and the agent's execd needs these defs to
+       resolve the executables in active-response/bin). -->
+  <command>
+    <name>aegis-win0</name>
+    <executable>aegis.cmd</executable>
+  </command>
+  <command>
+    <name>aegis-nix0</name>
+    <executable>aegis</executable>
+  </command>
+  <command>
+    <name>aegis-win-apply0</name>
+    <executable>aegis-apply.cmd</executable>
+  </command>
+  <command>
+    <name>aegis-nix-apply0</name>
+    <executable>aegis-apply</executable>
+  </command>
+  <command>
+    <name>aegis-win-update0</name>
+    <executable>aegis-update.cmd</executable>
+  </command>
+  <command>
+    <name>aegis-nix-update0</name>
+    <executable>aegis-update</executable>
+  </command>
 
   <!-- OPTIONAL scheduled patching (uncomment + set command path/interval to enable):
   <wodle name="command">
@@ -351,7 +415,7 @@ Aegis manager setup complete.
 Next:
   1. Bootstrap each agent (one-liner from the README) — it enables remote_commands.
   2. Assign each agent to its role group (dashboard, or: /var/ossec/bin/agent_groups -a -i <id> -g <role>).
-  3. Trigger a run:  curl -k -X PUT "https://127.0.0.1:55000/active-response?agents_list=<id>" \\
-       -H "Authorization: Bearer <admin-token>" -H "Content-Type: application/json" \\
-       -d '{"command":"aegis-win"}'   # or aegis-nix
+  3. Trigger a run:  curl -k -X PUT "https://127.0.0.1:55000/active-response?agents_list=<id>" \
+       -H "Authorization: Bearer ***" -H "Content-Type: application/json" \
+       -d '{"command":"aegis-win0"}'   # or aegis-nix0 (ar.conf names — dry run; use -apply0 to actually patch)
 DONE

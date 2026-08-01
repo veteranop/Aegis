@@ -3,7 +3,8 @@
   Aegis bootstrap (Windows) — one-time installer. Run as Administrator.
 
   Bolts Aegis onto an existing Wazuh agent: downloads the pinned engine, places it
-  in the agent's active-response/bin, enables remote_commands, and makes the box
+  in the agent's active-response/bin, flips the agent's remote-command master switch
+  (wazuh_command.remote_commands — shipped default OFF), and makes the box
   AR-ready. Reads NO client data — role/policy come from the agent's Wazuh label at
   run time. Generic + safe to publish.
 
@@ -101,7 +102,8 @@ $env:AEGIS_REF = $ref; $env:AEGIS_NO_RESTART = "1"
 Invoke-RestMethod "https://raw.githubusercontent.com/$repo/$ref/bootstrap.ps1" -Headers $hdr | Invoke-Expression
 '@
 
-# 5. enable remote_commands (the accepted-risk gate) unless told not to
+# 5. flip the agent's remote-command master switch (wazuh_command.remote_commands; default OFF)
+#    unless told not to
 if (-not $NoRemoteCommands) {
     $lio = Join-Path $agent "local_internal_options.conf"
     if (-not (Test-Path $lio)) { New-Item -ItemType File -Force -Path $lio | Out-Null }
