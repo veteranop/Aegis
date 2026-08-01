@@ -58,4 +58,11 @@ printf '{"timestamp":"%s","tool":"aegis","app":"engine","host":"%s","role":"%s",
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname)" "$ROLE" "$SRC" "$REBOOT" \
   "$([ $APPLY -eq 1 ] && echo true || echo false)" >> "$LOGDIR/aegis-app.log" 2>/dev/null || true
 
-exec bash "$PATCH" "${ARGS[@]}"
+case "$(uname -s)" in
+  Darwin)
+    # caffeinate: macOS idle-sleep froze patch runs mid-softwareupdate (30 days of
+    # "dispatched but never completed" — the minis sleep while the run is active).
+    # caffeinate holds the system awake for the lifetime of the child.
+    exec caffeinate -s -i bash "$PATCH" "${ARGS[@]}" ;;
+  *)      exec bash "$PATCH" "${ARGS[@]}" ;;
+esac
