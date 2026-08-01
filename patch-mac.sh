@@ -52,7 +52,25 @@ jstr(){ printf '%s' "${1:-}" | tr '\n\r\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g';
 # --- Apple software updates ---
 # 2>&1: softwareupdate writes its banner and "No new software available." to
 # stderr, so discarding stderr left $AVAIL routinely empty.
-AVAIL=$(softwareupdate -l 2>&1 || true)
+# TIMEOUT: a wedged softwareupdated daemon makes `softwareupdate -l` hang
+# FOREVER (observed on Ascend MBP-1/MBP-2, 2026-08-01 — every run for 30 days
+# dispatched but never completed; runs hung while the machines were awake).
+# Time-box it so the run COMPLETES with a diagnosable result instead of dying
+# silently: on timeout, $AVAIL becomes an AEGIS-WARN the result line carries.
+SU_TIMEOUT=180
+OUT="$LOG_DIR/swupd_list.$$"
+softwareupdate -l > "$OUT" 2>&1 &
+SUPID=$!
+( sleep "$SU_TIMEOUT"; kill -9 "$SUPID" 2>/dev/null ) &
+KILLER=$!
+wait "$SUPID" 2>/dev/null
+kill "$KILLER" 2>/dev/null
+if [ -s "$OUT" ]; then
+  AVAIL=$(cat "$OUT")
+else
+  AVAIL="AEGIS-WARN: softwareupdate -l timed out after ${SU_TIMEOUT}s (softwareupdated wedged? try: sudo killall softwareupdated)"
+fi
+rm -f "$OUT"
 # grep -c prints "0" AND exits 1 when nothing matches, so a `|| echo 0` fallback
 # appends a SECOND zero -> the literal bytes "0\n0". That both corrupted the JSON
 # record and made `[ "$OS_UPDATES" -gt 0 ]` a bash error, silently skipping the
