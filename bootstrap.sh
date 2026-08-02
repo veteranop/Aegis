@@ -28,12 +28,19 @@ mkdir -p "$DEST"
 AUTH=(); [ -n "$TOKEN" ] && AUTH=(-H "Authorization: token $TOKEN")
 
 case "$(uname -s)" in Darwin) PATCH="patch-mac.sh" ;; *) PATCH="patch-linux.sh" ;; esac
-# relay-first artifact fetch: the fleet LAN relay (Ascend manager 192.168.1.11:8008)
-# mirrors the release files; fall back to GitHub raw when the relay is unreachable.
-# Clients that can't reach raw.githubusercontent.com (observed: Ascend Macs hang on
-# every outbound curl) still bootstrap via the LAN relay. BASE_URL comes from
-# /etc/aegis/ref (recorded at install) or AEGIS_BASE_URL; default = the relay.
-BASE_URL="${AEGIS_BASE_URL:-http://192.168.1.11:8008}"
+# relay-first artifact fetch: try the manager's Aegis relay first (the relay is
+# installed ON the Wazuh manager, not hardcoded per-site), then fall back to
+# GitHub raw. Clients that can't reach raw.githubusercontent.com (observed:
+# Ascend Macs hang on every outbound curl) still bootstrap via the manager
+# relay. BASE_URL order: AEGIS_BASE_URL env override (e.g. a site LAN relay) >
+# the Wazuh manager this agent reports to (from its own ossec.conf) > localhost.
+BASE_URL="${AEGIS_BASE_URL:-}"
+if [ -z "$BASE_URL" ]; then
+  _mgr=""
+  [ -f "$OSSEC/etc/ossec.conf" ] && \
+    _mgr=$(grep -oE '<address>[^<]+</address>' "$OSSEC/etc/ossec.conf" 2>/dev/null | head -1 | sed -E 's#</?address>##g' | tr -d ' ')
+  BASE_URL="http://${_mgr:-127.0.0.1}:8008"
+fi
 GH_BASE="https://raw.githubusercontent.com/$REPO/$REF"
 fetch() {  # $1 relpath, $2 outfile — relay first, GitHub fallback (auth if set)
   if curl -fsSL --max-time 20 "$BASE_URL/$1" -o "$2" 2>/dev/null; then return 0; fi
@@ -80,15 +87,17 @@ WRAP
 chmod +x "$OSSEC/active-response/bin/aegis-update"
 cat > "$DEST/aegis-update.sh" <<'UPD'
 #!/usr/bin/env bash
-# Aegis self-update: re-pull the pinned engine from GitHub + re-run bootstrap, tracking
-# the repo/ref recorded at install (/etc/aegis/ref). Runs with AEGIS_NO_RESTART=1.
+# Aegis self-update: re-pull the pinned engine from the ref-recorded channel +
+# re-run bootstrap, tracking the repo/ref recorded at install (/etc/aegis/ref).
+# Runs with AEGIS_NO_RESTART=1. BASE_URL comes from /etc/aegis/ref (recorded at
+# install); falls back to GitHub raw when the relay is unreachable.
 set -e
-REPO=veteranop/Aegis; REF=main; TOKEN=; BASE_URL=http://192.168.1.11:8008
+REPO=veteranop/Aegis; REF=main; TOKEN=; BASE_URL=
 [ -f /etc/aegis/ref ] && . /etc/aegis/ref 2>/dev/null || true
 AUTH=(); [ -n "${TOKEN:-}" ] && AUTH=(-H "Authorization: token $TOKEN")
-( curl -fsSL --max-time 20 "$BASE_URL/bootstrap.sh" 2>/dev/null \
+( [ -n "${BASE_URL:-}" ] && curl -fsSL --max-time 20 "$BASE_URL/bootstrap.sh" 2>/dev/null \
     || curl -fsSL ${AUTH[@]+"${AUTH[@]}"} --max-time 25 "https://raw.githubusercontent.com/$REPO/$REF/bootstrap.sh" ) \
-  | AEGIS_REPO="$REPO" AEGIS_REF="$REF" AEGIS_BASE_URL="$BASE_URL" AEGIS_TOKEN="${TOKEN:-}" AEGIS_NO_RESTART=1 bash
+  | AEGIS_REPO="$REPO" AEGIS_REF="$REF" AEGIS_BASE_URL="${BASE_URL:-}" AEGIS_TOKEN="${TOKEN:-}" AEGIS_NO_RESTART=1 bash
 UPD
 chmod +x "$DEST/aegis-update.sh"
 
