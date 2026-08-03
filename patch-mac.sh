@@ -40,6 +40,24 @@ CASKS_TO_MANAGE=(
 CONSOLE_USER=$(stat -f%Su /dev/console 2>/dev/null)
 note_err(){ STATUS="error"; ERRORS="${ERRORS}${ERRORS:+; }$1"; }
 
+# Run a brew command AS THE CONSOLE USER and, on failure, fold the REAL brew
+# stderr into the errors field. Without this the errors field only ever said
+# "brew upgrade failed" — the actual cause (e.g. git "dubious ownership",
+# /opt/homebrew not writable, missing CLT) lived only in aegis-app.log, which
+# the agent's json localfile silently drops. Now every brew failure is
+# self-diagnosing straight from the Wazuh record (rule 100106). We prefer the
+# telltale error lines and cap length so the one-line JSON stays sane.
+brew_run(){  # $1 = failure label, $2 = command string (run under bash -lc)
+  local label="$1" cmd="$2" out rc msg
+  out=$(sudo -u "$CONSOLE_USER" bash -lc "$cmd" 2>&1); rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  msg=$(printf '%s\n' "$out" | grep -iE 'error|fatal|denied|permission|not permitted|dubious|read-?only|no such|command not found|xcrun' | tail -2 | tr '\n' ' ')
+  [ -n "$msg" ] || msg=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -2 | tr '\n' ' ')
+  msg=$(printf '%s' "$msg" | cut -c1-240)
+  note_err "$label (rc=$rc): ${msg:-no output}"
+  return 1
+}
+
 # --- emit safety ---
 # Every value below is interpolated into a ONE-LINE JSON record that Wazuh's
 # logcollector reads with <log_format>json</log_format>. A stray newline or quote
@@ -106,17 +124,15 @@ if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
       BREW_UPDATES=$(sudo -u "$CONSOLE_USER" bash -lc "$BREW outdated | wc -l" 2>/dev/null | tr -d ' ' || echo 0)
       CASK_UPDATES=$(sudo -u "$CONSOLE_USER" bash -lc "$BREW outdated --cask | wc -l" 2>/dev/null | tr -d ' ' || echo 0)
     else
-      sudo -u "$CONSOLE_USER" bash -lc "$BREW update && $BREW upgrade && $BREW cleanup" || note_err "brew upgrade failed"
-      sudo -u "$CONSOLE_USER" bash -lc "$BREW upgrade --cask" || note_err "brew cask upgrade failed"
+      brew_run "brew upgrade failed" "$BREW update && $BREW upgrade && $BREW cleanup"
+      brew_run "brew cask upgrade failed" "$BREW upgrade --cask"
       BREW_UPDATES=1; CASK_UPDATES=1
       # adopt curated vendor-installed apps into brew so they actually get patched
       for pair in "${CASKS_TO_MANAGE[@]}"; do
         cask="${pair%%:*}"; app="${pair#*:}"
         [ -d "/Applications/$app" ] || continue          # present only — never install new software
-        if sudo -u "$CONSOLE_USER" bash -lc "$BREW install --cask --adopt \"$cask\""; then
+        if brew_run "adopt $cask failed" "$BREW install --cask --adopt \"$cask\""; then
           CASKS_ADOPTED=$((CASKS_ADOPTED + 1))
-        else
-          note_err "adopt $cask failed"
         fi
       done
     fi
