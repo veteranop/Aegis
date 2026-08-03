@@ -58,6 +58,16 @@ printf '{"timestamp":"%s","tool":"aegis","app":"engine","host":"%s","role":"%s",
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname)" "$ROLE" "$SRC" "$REBOOT" \
   "$([ $APPLY -eq 1 ] && echo true || echo false)" >> "$LOGDIR/aegis-app.log" 2>/dev/null || true
 
+# CRITICAL: execd reads exactly ONE line from the AR child's stdout (the
+# alert-keys handshake, echoed above) and then CLOSES the pipe
+# (wpclose -> fclose(file_out)) before blocking in waitpid. ANY later
+# stdout write from the child hits a closed pipe -> SIGPIPE -> the run is
+# killed mid-patch with no result line (observed 2026-08-03 on OVH Linux
+# VPSes: dry-runs dispatched but never completed). Redirect stdout to the
+# app log BEFORE exec'ing the patch script so the child can never die on
+# a closed pipe. The handshake above already happened on the real stdout.
+exec >> "$LOGDIR/aegis-app.log" 2>&1 || true
+
 case "$(uname -s)" in
   Darwin)
     # caffeinate: macOS idle-sleep froze patch runs mid-softwareupdate (30 days of
