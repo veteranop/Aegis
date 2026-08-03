@@ -25,10 +25,14 @@ mkdir -p "$LOG_DIR"
 HOST=$(scutil --get ComputerName 2>/dev/null || hostname)
 STATUS="success"; ERRORS=""; OS_UPDATES=0; BREW_UPDATES=0; CASK_UPDATES=0; CASKS_ADOPTED=0; REBOOT_REQ=0
 
-# Curated vendor apps to bring under brew management ("cask_id:App bundle.app"). Apps
-# installed straight from the vendor (Adobe, NoMachine, ...) are invisible to
-# `brew upgrade`; adopting them installs the latest (patches the finding) and hands
-# future upkeep to brew. We ONLY adopt apps that are already present — never install new.
+# Vendor apps to bring under brew management ("cask_id:App bundle.app"). Apps
+# installed straight from the vendor (Adobe, NoMachine, Zoom, ...) are invisible
+# to `brew upgrade`; `brew install --cask --adopt <cask>` adopts an app that is
+# ALREADY present in /Applications — never installs new software — and hands its
+# future patching to brew. ADOPT IS DEFAULT-ON (Mark 2026-08-03: mac fleet must
+# manage/patch every vendor app). The curated map is the override list (cask
+# names that differ from the app-bundle slug, e.g. zoom.us.app -> zoom); every
+# OTHER .app in /Applications is attempted via a slug-derived cask name too.
 CASKS_TO_MANAGE=(
   "adobe-acrobat-reader:Adobe Acrobat Reader.app"
   "nomachine:NoMachine.app"
@@ -71,6 +75,36 @@ brew_run(){  # $1 = failure label, $2 = command string (run under bash -lc)
   msg=$(printf '%s' "$msg" | cut -c1-240)
   note_err "$label (rc=$rc): ${msg:-no output}"
   return 1
+}
+
+# Adopt a vendor app already present in /Applications into brew so brew manages
+# and patches it. $1 = absolute app path. Never installs new software (adopt
+# only acts on apps that exist). Silent-skips Apple system apps (bundle id
+# com.apple.*) and casks that don't exist in the tap; counts real adoptions.
+# Errors that ARE real (installer failures, permissions) fold into the errors
+# field via brew_run. Also handles the dry-run case: report-only, no adopt.
+adopt_app(){  # $1 = app path
+  local app="$1" cask="" pair="" bid="" base
+  [ -d "$app" ] || return 0
+  # 1) curated override (cask != slug), 2) slug-derived cask (lowercase, spaces->dashes)
+  for pair in "${CASKS_TO_MANAGE[@]}"; do
+    [ "$app" = "/Applications/${pair#*:}" ] && cask="${pair%%:*}" && break
+  done
+  if [ -z "$cask" ]; then
+    base=$(basename "$app" .app)
+    cask=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+  fi
+  # skip Apple system apps (Safari, Mail, ...) — never adopt those
+  bid=$(defaults read "$app/Contents/Info.plist" CFBundleIdentifier 2>/dev/null || true)
+  case "$bid" in com.apple.*) return 0 ;; esac
+  if [ "$DRY_RUN" -eq 1 ]; then
+    echo "DRY RUN — would adopt: $cask ($(basename "$app"))"
+    return 0
+  fi
+  if brew_run "adopt $cask failed" "$BREW install --cask --adopt \"$cask\""; then
+    CASKS_ADOPTED=$((CASKS_ADOPTED + 1))
+    echo "adopted: $cask"
+  fi
 }
 
 # --- emit safety ---
@@ -142,13 +176,21 @@ if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
       brew_run "brew upgrade failed" "$BREW update && $BREW upgrade && $BREW cleanup"
       brew_run "brew cask upgrade failed" "$BREW upgrade --cask"
       BREW_UPDATES=1; CASK_UPDATES=1
-      # adopt curated vendor-installed apps into brew so they actually get patched
+      # ADOPT-ALL (default, Mark 2026-08-03): bring EVERY vendor app already in
+      # /Applications under brew management so brew patches it. Curated overrides
+      # first, then every other .app (system apps skipped via com.apple.* bid).
+      # The glob pass skips paths already handled by the curated list (no
+      # associative arrays — macOS ships bash 3.2).
       for pair in "${CASKS_TO_MANAGE[@]}"; do
-        cask="${pair%%:*}"; app="${pair#*:}"
-        [ -d "/Applications/$app" ] || continue          # present only — never install new software
-        if brew_run "adopt $cask failed" "$BREW install --cask --adopt \"$cask\""; then
-          CASKS_ADOPTED=$((CASKS_ADOPTED + 1))
-        fi
+        adopt_app "/Applications/${pair#*:}"
+      done
+      for app in /Applications/*.app; do
+        already=0; pair2=""
+        for pair2 in "${CASKS_TO_MANAGE[@]}"; do
+          [ "$app" = "/Applications/${pair2#*:}" ] && already=1 && break
+        done
+        [ "$already" -eq 1 ] && continue
+        adopt_app "$app"
       done
     fi
   fi
