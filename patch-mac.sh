@@ -72,7 +72,7 @@ brew_run(){  # $1 = failure label, $2 = command string (run under bash -lc)
   [ "$rc" -eq 0 ] && return 0
   msg=$(printf '%s\n' "$out" | grep -iE 'error|fatal|denied|permission|not permitted|dubious|read-?only|no such|command not found|xcrun' | tail -2 | tr '\n' ' ')
   [ -n "$msg" ] || msg=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -2 | tr '\n' ' ')
-  msg=$(printf '%s' "$msg" | cut -c1-240)
+  msg=$(printf '%s' "$msg" | cut -c1-400)
   note_err "$label (rc=$rc): ${msg:-no output}"
   return 1
 }
@@ -84,7 +84,7 @@ brew_run(){  # $1 = failure label, $2 = command string (run under bash -lc)
 # Errors that ARE real (installer failures, permissions) fold into the errors
 # field via brew_run. Also handles the dry-run case: report-only, no adopt.
 adopt_app(){  # $1 = app path
-  local app="$1" cask="" pair="" bid="" base
+  local app="$1" cask="" pair="" bid="" base out rc
   [ -d "$app" ] || return 0
   # 1) curated override (cask != slug), 2) slug-derived cask (lowercase, spaces->dashes)
   for pair in "${CASKS_TO_MANAGE[@]}"; do
@@ -99,6 +99,13 @@ adopt_app(){  # $1 = app path
   case "$bid" in com.apple.*) return 0 ;; esac
   if [ "$DRY_RUN" -eq 1 ]; then
     echo "DRY RUN — would adopt: $cask ($(basename "$app"))"
+    return 0
+  fi
+  # cask-exists gate: brew install --cask --adopt on a NONEXISTENT cask prints
+  # "To install <suggestion>, run: ..." and exits 1 — that's a slug miss, not a
+  # failure. Check `brew info --cask` first so misses stay SILENT (no error
+  # noise) while real adopt attempts keep their full error text.
+  if ! (cd /tmp && sudo -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW info --cask \"$cask\" >/dev/null 2>&1"); then
     return 0
   fi
   if brew_run "adopt $cask failed" "$BREW install --cask --adopt \"$cask\""; then
