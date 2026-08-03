@@ -40,6 +40,15 @@ CASKS_TO_MANAGE=(
 CONSOLE_USER=$(stat -f%Su /dev/console 2>/dev/null)
 note_err(){ STATUS="error"; ERRORS="${ERRORS}${ERRORS:+; }$1"; }
 
+# Rosetta trap (hit live 2026-08-03, Ascend Macs): the Wazuh agent binary on
+# Apple Silicon can run as x86_64 (Rosetta) — every AR child inherits that arch,
+# and `brew` REFUSES the ARM default prefix from a Rosetta shell ("Error: Cannot
+# install under Rosetta 2 in ARM default prefix (/opt/homebrew)!"), failing ALL
+# brew commands instantly. /opt/homebrew exists ONLY on ARM Macs, so its presence
+# is the gate: wrap brew shells in `arch -arm64` when we're on Apple Silicon.
+BREW_ARCH=()
+[ -d /opt/homebrew ] && BREW_ARCH=(arch -arm64)
+
 # Run a brew command AS THE CONSOLE USER and, on failure, fold the REAL brew
 # stderr into the errors field. Without this the errors field only ever said
 # "brew upgrade failed" — the actual cause (e.g. git "dubious ownership",
@@ -55,7 +64,7 @@ brew_run(){  # $1 = failure label, $2 = command string (run under bash -lc)
   # "shell-init: error retrieving current directory" and brew refuses ("Error:
   # $PWD must be set"). cd inside the command string is too late. The subshell
   # cds as root, then sudo spawns bash from /tmp (world-accessible).
-  out=$( (cd /tmp && sudo -u "$CONSOLE_USER" bash -lc "$cmd") 2>&1); rc=$?
+  out=$( (cd /tmp && sudo -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$cmd") 2>&1); rc=$?
   [ "$rc" -eq 0 ] && return 0
   msg=$(printf '%s\n' "$out" | grep -iE 'error|fatal|denied|permission|not permitted|dubious|read-?only|no such|command not found|xcrun' | tail -2 | tr '\n' ' ')
   [ -n "$msg" ] || msg=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -2 | tr '\n' ' ')
@@ -126,9 +135,9 @@ if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
   if [ -n "$BREW" ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
       echo "DRY RUN — brew outdated (formulae + casks):"
-      (cd /tmp && sudo -u "$CONSOLE_USER" bash -lc "$BREW update >/dev/null 2>&1; $BREW outdated; echo '-- casks --'; $BREW outdated --cask") || true
-      BREW_UPDATES=$((cd /tmp && sudo -u "$CONSOLE_USER" bash -lc "$BREW outdated | wc -l") 2>/dev/null | tr -d ' ' || echo 0)
-      CASK_UPDATES=$((cd /tmp && sudo -u "$CONSOLE_USER" bash -lc "$BREW outdated --cask | wc -l") 2>/dev/null | tr -d ' ' || echo 0)
+      (cd /tmp && sudo -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW update >/dev/null 2>&1; $BREW outdated; echo '-- casks --'; $BREW outdated --cask") || true
+      BREW_UPDATES=$((cd /tmp && sudo -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW outdated | wc -l") 2>/dev/null | tr -d ' ' || echo 0)
+      CASK_UPDATES=$((cd /tmp && sudo -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW outdated --cask | wc -l") 2>/dev/null | tr -d ' ' || echo 0)
     else
       brew_run "brew upgrade failed" "$BREW update && $BREW upgrade && $BREW cleanup"
       brew_run "brew cask upgrade failed" "$BREW upgrade --cask"
