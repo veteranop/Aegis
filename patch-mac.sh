@@ -49,7 +49,11 @@ note_err(){ STATUS="error"; ERRORS="${ERRORS}${ERRORS:+; }$1"; }
 # telltale error lines and cap length so the one-line JSON stays sane.
 brew_run(){  # $1 = failure label, $2 = command string (run under bash -lc)
   local label="$1" cmd="$2" out rc msg
-  out=$(sudo -u "$CONSOLE_USER" bash -lc "$cmd" 2>&1); rc=$?
+  # cd /tmp FIRST: the engine's CWD (e.g. /var/ossec/...) is unreadable by the
+  # console user, so bash -lc bails with "getcwd: cannot access parent
+  # directories" and brew refuses ("Error: $PWD must be set"). /tmp is
+  # world-accessible; brew doesn't care where it runs from.
+  out=$(sudo -u "$CONSOLE_USER" bash -lc "cd /tmp && $cmd" 2>&1); rc=$?
   [ "$rc" -eq 0 ] && return 0
   msg=$(printf '%s\n' "$out" | grep -iE 'error|fatal|denied|permission|not permitted|dubious|read-?only|no such|command not found|xcrun' | tail -2 | tr '\n' ' ')
   [ -n "$msg" ] || msg=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -2 | tr '\n' ' ')
@@ -120,9 +124,9 @@ if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
   if [ -n "$BREW" ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
       echo "DRY RUN — brew outdated (formulae + casks):"
-      sudo -u "$CONSOLE_USER" bash -lc "$BREW update >/dev/null 2>&1; $BREW outdated; echo '-- casks --'; $BREW outdated --cask" || true
-      BREW_UPDATES=$(sudo -u "$CONSOLE_USER" bash -lc "$BREW outdated | wc -l" 2>/dev/null | tr -d ' ' || echo 0)
-      CASK_UPDATES=$(sudo -u "$CONSOLE_USER" bash -lc "$BREW outdated --cask | wc -l" 2>/dev/null | tr -d ' ' || echo 0)
+      sudo -u "$CONSOLE_USER" bash -lc "cd /tmp && $BREW update >/dev/null 2>&1; $BREW outdated; echo '-- casks --'; $BREW outdated --cask" || true
+      BREW_UPDATES=$(sudo -u "$CONSOLE_USER" bash -lc "cd /tmp && $BREW outdated | wc -l" 2>/dev/null | tr -d ' ' || echo 0)
+      CASK_UPDATES=$(sudo -u "$CONSOLE_USER" bash -lc "cd /tmp && $BREW outdated --cask | wc -l" 2>/dev/null | tr -d ' ' || echo 0)
     else
       brew_run "brew upgrade failed" "$BREW update && $BREW upgrade && $BREW cleanup"
       brew_run "brew cask upgrade failed" "$BREW upgrade --cask"
