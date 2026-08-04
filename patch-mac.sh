@@ -108,6 +108,20 @@ adopt_app(){  # $1 = app path
   if ! (cd /tmp && sudo -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW info --cask \"$cask\" >/dev/null 2>&1"); then
     return 0
   fi
+  # PKG-CASK SKIP (2026-08-04, H2621511): brew --adopt on a pkg-type cask
+  # shells out to /usr/sbin/installer -pkg, which requires GUI/admin auth and
+  # FAILS headless with rc=1 (observed: NoMachine, Zoom, Teams, Google Drive on
+  # Ascend-MBP-1 — 5 CRITICAL alerts in 24h). Detect the artifact type from
+  # `brew info --json=v2` generically (any ".pkg" artifact ⇒ skip the whole
+  # adopt path for that cask) instead of a brittle denylist, so future
+  # pkg-backed apps hit the same safe skip. Skipped ≠ error: no note_err, no
+  # status flip — the cask stays in CASKS_TO_MANAGE for a future GUI adopt.
+  # ADOPT-ALL remains default-on for drag-drop .app bundles (Mark 2026-08-03).
+  if (cd /tmp && sudo -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc \
+      "$BREW info --json=v2 --cask \"$cask\" 2>/dev/null" | grep -q '\.pkg'); then
+    echo "pkg cask $cask — requires GUI adopt (installer -pkg fails headless); skipped"
+    return 0
+  fi
   if brew_run "adopt $cask failed" "$BREW install --cask --adopt \"$cask\""; then
     CASKS_ADOPTED=$((CASKS_ADOPTED + 1))
     echo "adopted: $cask"
