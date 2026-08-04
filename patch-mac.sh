@@ -72,8 +72,12 @@ brew_run(){  # $1 = failure label, $2 = command string (run under bash -lc)
   # /var/ossec/...) is unreadable by the console user, bash bails with
   # "shell-init: error retrieving current directory" and brew refuses ("Error:
   # $PWD must be set"). cd inside the command string is too late. The subshell
-  # cds as root, then sudo spawns bash from /tmp (world-accessible).
-  out=$( (cd /tmp && sudo -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$cmd") 2>&1); rc=$?
+  # cds as root, then sudo spawns bash from /tmp (world-accessible). -H sets
+  # HOME to the console user's home so brew's bootsnap/cache land in THEIR
+  # ~/Library/Caches/Homebrew; without it brew inherited the AR parent's HOME
+  # (e.g. /Users/veteranop-ops or /var/root) and died with Errno::EACCES on a
+  # cache path the console user can't write (H2621609).
+  out=$( (cd /tmp && sudo -H -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$cmd") 2>&1); rc=$?
   [ "$rc" -eq 0 ] && return 0
   msg=$(printf '%s\n' "$out" | grep -iE 'error|fatal|denied|permission|not permitted|dubious|read-?only|no such|command not found|xcrun' | tail -2 | tr '\n' ' ')
   [ -n "$msg" ] || msg=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -2 | tr '\n' ' ')
@@ -110,7 +114,7 @@ adopt_app(){  # $1 = app path
   # "To install <suggestion>, run: ..." and exits 1 — that's a slug miss, not a
   # failure. Check `brew info --cask` first so misses stay SILENT (no error
   # noise) while real adopt attempts keep their full error text.
-  if ! (cd /tmp && sudo -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW info --cask \"$cask\" >/dev/null 2>&1"); then
+  if ! (cd /tmp && sudo -H -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW info --cask \"$cask\" >/dev/null 2>&1"); then
     return 0
   fi
   # PKG-CASK SKIP (2026-08-04, H2621511): brew --adopt on a pkg-type cask
@@ -122,7 +126,7 @@ adopt_app(){  # $1 = app path
   # pkg-backed apps hit the same safe skip. Skipped ≠ error: no note_err, no
   # status flip — the cask stays in CASKS_TO_MANAGE for a future GUI adopt.
   # ADOPT-ALL remains default-on for drag-drop .app bundles (Mark 2026-08-03).
-  if (cd /tmp && sudo -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc \
+  if (cd /tmp && sudo -H -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc \
       "$BREW info --json=v2 --cask \"$cask\" 2>/dev/null" | grep -q '\.pkg'); then
     echo "pkg cask $cask — requires GUI adopt (installer -pkg fails headless); skipped"
     return 0
@@ -191,13 +195,19 @@ fi
 # Windows user-context winget pass. Casks flagged auto_updates are skipped unless you
 # add --greedy (aggressive; re-touches self-updating apps), so we stay non-greedy.
 if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
-  BREW=$(sudo -u "$CONSOLE_USER" bash -lc 'command -v brew' 2>/dev/null || true)
+  # cd /tmp BEFORE sudo (same reason as brew_run: execd hands us an unreadable
+  # CWD, e.g. /Library/Ossec, and the console user's shell-init getcwd() fails).
+  # PATH bootstrap: `bash -lc` login shell does NOT put /opt/homebrew/bin on PATH
+  # for a non-brew login profile, so a bare `command -v brew` returned empty and
+  # the whole brew block was skipped (brew_ran=0). Prepend the standard Homebrew
+  # prefixes so detection resolves to the absolute brew path used downstream.
+  BREW=$( (cd /tmp && sudo -H -u "$CONSOLE_USER" bash -lc 'export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"; command -v brew') 2>/dev/null || true)
   if [ -n "$BREW" ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
       echo "DRY RUN — brew outdated (formulae + casks):"
-      (cd /tmp && sudo -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW update >/dev/null 2>&1; $BREW outdated; echo '-- casks --'; $BREW outdated --cask") || true
-      BREW_UPDATES=$((cd /tmp && sudo -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW outdated | wc -l") 2>/dev/null | tr -d ' ' || echo 0)
-      CASK_UPDATES=$((cd /tmp && sudo -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW outdated --cask | wc -l") 2>/dev/null | tr -d ' ' || echo 0)
+      (cd /tmp && sudo -H -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW update >/dev/null 2>&1; $BREW outdated; echo '-- casks --'; $BREW outdated --cask") || true
+      BREW_UPDATES=$((cd /tmp && sudo -H -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW outdated | wc -l") 2>/dev/null | tr -d ' ' || echo 0)
+      CASK_UPDATES=$((cd /tmp && sudo -H -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW outdated --cask | wc -l") 2>/dev/null | tr -d ' ' || echo 0)
     else
       brew_run "brew upgrade failed" "$BREW update && $BREW upgrade && $BREW cleanup"
       brew_run "brew cask upgrade failed" "$BREW upgrade --cask"
@@ -248,7 +258,12 @@ if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
   # Returns the command's rc, or a non-zero (137 = SIGKILL) if the killer fired.
   run_timed(){  # $1 = command string (bash -lc as console user), $2 = outfile
     local cmd="$1" outf="$2" pid killer rc
-    ( sudo -u "$CONSOLE_USER" bash -lc "$cmd" ) > "$outf" 2>&1 &
+    # cd /tmp BEFORE the sudo -u transition: execd hands the AR child a CWD the
+    # console user cannot access (observed: /Library/Ossec), so python's
+    # os.getcwd() throws PermissionError and pip aborts. -H sets HOME to the
+    # console user's home so `pip install --user` lands in THEIR ~/.local, not
+    # root's. (Same cd-first pattern as brew_run.)
+    ( cd /tmp && sudo -H -u "$CONSOLE_USER" bash -lc "$cmd" ) > "$outf" 2>&1 &
     pid=$!
     ( sleep "$PIP_TIMEOUT"; kill -9 "$pid" 2>/dev/null ) &
     killer=$!
@@ -263,7 +278,13 @@ if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
   for PY in $PIP_PYTHONS; do
     [ -x "$PY" ] || continue
     # Must actually expose pip (a bare CLT python3 may not) — probe quietly.
-    sudo -u "$CONSOLE_USER" "$PY" -m pip --version >/dev/null 2>&1 || continue
+    # cd /tmp first: under the Wazuh Active-Response (execd) path the AR child
+    # inherits an unreadable CWD (/Library/Ossec); `sudo -u <user> python -m pip`
+    # then dies with `PermissionError: [Errno 13]` in os.getcwd(), so the probe
+    # returned rc!=0 and `|| continue` silently skipped EVERY interpreter — the
+    # pip block never ran under AR (worked fine over an SSH shell whose CWD the
+    # user could read). H2621609. -H matches run_timed for HOME consistency.
+    (cd /tmp && sudo -H -u "$CONSOLE_USER" "$PY" -m pip --version) >/dev/null 2>&1 || continue
 
     POUT="$LOG_DIR/pip_outdated.$$"
     run_timed "$PY -m pip list --outdated --format=json --disable-pip-version-check" "$POUT"; prc=$?
