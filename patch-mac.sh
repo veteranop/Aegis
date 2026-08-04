@@ -82,6 +82,29 @@ brew_run(){  # $1 = failure label, $2 = command string (run under bash -lc)
   msg=$(printf '%s\n' "$out" | grep -iE 'error|fatal|denied|permission|not permitted|dubious|read-?only|no such|command not found|xcrun' | tail -2 | tr '\n' ' ')
   [ -n "$msg" ] || msg=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -2 | tr '\n' ' ')
   msg=$(printf '%s' "$msg" | cut -c1-400)
+  # Environmental vs engine failure (H2621609 v0.5.4). Homebrew rolls the
+  # per-cask failures of `upgrade`/`--adopt` up into "Problems with multiple
+  # casks:" ONLY after it has evaluated each cask — so that marker, and the
+  # individual causes we hit across the fleet, are all MACHINE STATE the engine
+  # cannot resolve non-interactively:
+  #   - a cask up/adopt step that shells out to `sudo` on a box where the console
+  #     user has no passwordless sudo ("a password is required" / "a terminal is
+  #     required to read the password" — metasploit msfremove, wireshark rm,
+  #     the `chmod -R a+rX` adopt does on slack/telegram/duckduckgo),
+  #   - a missing App source ("App source '...' is not there" — mumble, sherlock),
+  #   - a dead vendor download / 404 (vnc-viewer),
+  #   - a Caskroom-vs-/Applications version skew ("... but is X for /Applications"
+  #     — balenaetcher),
+  #   - a cask's own launchctl probe (pearcleaner).
+  # None are patch-engine bugs; flipping the WHOLE run to error on them buries a
+  # genuine regression and pages on state a patch pass can't fix. Downgrade to
+  # AEGIS-WARN. Everything else — brew itself broken, Rosetta trap, git dubious
+  # ownership, HOME/PWD unset, Caskroom perms, formulae-API network down — has NO
+  # such marker and stays a real error. Classify on the FULL output, not $msg.
+  if printf '%s\n' "$out" | grep -qiE 'Problems with multiple casks|a password is required|a terminal is required to read the password|App source .* is not there|Download failed|curl: \([0-9]+\)|returned error: (40[0-9]|50[0-9])|launchctl|but is .* for /Applications'; then
+    note_warn "$label (environmental, rc=$rc): ${msg:-no output}"
+    return 1
+  fi
   note_err "$label (rc=$rc): ${msg:-no output}"
   return 1
 }
@@ -309,15 +332,22 @@ if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
     fi
 
     # One upgrade transaction per interpreter. Upgrading pip ITSELF is desired
-    # (CLT pip 21.2.4 is one of the flagged packages). $OUTDATED is intentionally
-    # unquoted for word-splitting into args (pip names never contain spaces).
+    # (CLT pip 21.2.4 is one of the flagged packages). OUTDATED is NEWLINE-
+    # delimited (grep -oE emits one name per line). run_timed embeds the command
+    # as a STRING into `bash -lc "$cmd"`, so an embedded newline is a COMMAND
+    # SEPARATOR: pip would receive only the FIRST name and every following name
+    # would run as its own command ("six: command not found", rc=127) — the live
+    # v0.5.3 apply failure (H2621609). Flatten to a single SPACE-separated arg
+    # list before embedding; pip names never contain spaces so word-splitting
+    # inside the console-user shell is safe.
+    OUTDATED_ARGS=$(printf '%s\n' "$OUTDATED" | tr '\n' ' ')
     PINS="$LOG_DIR/pip_install.$$"
-    run_timed "$PY -m pip install --user --upgrade $OUTDATED" "$PINS"; irc=$?
+    run_timed "$PY -m pip install --user --upgrade $OUTDATED_ARGS" "$PINS"; irc=$?
     if [ "$irc" -eq 0 ]; then
       PIP_UPDATES=$((PIP_UPDATES + N)); echo "pip upgraded ($N) for $PY"
     elif grep -qi 'externally-managed' "$PINS"; then
       # PEP 668 fallback — retry ONCE allowing the user-site install past the marker.
-      run_timed "$PY -m pip install --user --upgrade --break-system-packages $OUTDATED" "$PINS"; irc=$?
+      run_timed "$PY -m pip install --user --upgrade --break-system-packages $OUTDATED_ARGS" "$PINS"; irc=$?
       if [ "$irc" -eq 0 ]; then
         PIP_UPDATES=$((PIP_UPDATES + N)); echo "pip upgraded ($N, PEP668 fallback) for $PY"
       else
