@@ -23,7 +23,7 @@ done
 mkdir -p "$LOG_DIR"
 
 HOST=$(scutil --get ComputerName 2>/dev/null || hostname)
-STATUS="success"; ERRORS=""; OS_UPDATES=0; BREW_UPDATES=0; CASK_UPDATES=0; CASKS_ADOPTED=0; REBOOT_REQ=0
+STATUS="success"; ERRORS=""; OS_UPDATES=0; BREW_UPDATES=0; CASK_UPDATES=0; CASKS_ADOPTED=0; PIP_UPDATES=0; REBOOT_REQ=0
 
 # Vendor apps to bring under brew management ("cask_id:App bundle.app"). Apps
 # installed straight from the vendor (Adobe, NoMachine, Zoom, ...) are invisible
@@ -43,6 +43,11 @@ CASKS_TO_MANAGE=(
 )
 CONSOLE_USER=$(stat -f%Su /dev/console 2>/dev/null)
 note_err(){ STATUS="error"; ERRORS="${ERRORS}${ERRORS:+; }$1"; }
+# note_warn: carry a non-fatal condition (e.g. pip index offline) in the SAME
+# errors field WITHOUT flipping STATUS to error — mirrors the AEGIS-WARN string
+# the softwareupdate-timeout path emits. A wedged/offline PyPI must NOT fail the
+# whole run; it's a warning, not a patch failure.
+note_warn(){ ERRORS="${ERRORS}${ERRORS:+; }AEGIS-WARN: $1"; }
 
 # Rosetta trap (hit live 2026-08-03, Ascend Macs): the Wazuh agent binary on
 # Apple Silicon can run as x86_64 (Rosetta) — every AR child inherits that arch,
@@ -217,10 +222,99 @@ if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
   fi
 fi
 
+# --- pip user-site upgrades (as the logged-in user) ---
+# WHY: 69 of 75 Wazuh vuln findings on the Macs are Python packages that ship
+# with the system interpreters — CLT pip 21.2.4 (/usr/bin/python3) AND brew pip
+# (/opt/homebrew/bin/python3), plus setuptools/urllib3/requests/wheel/certifi/...
+# softwareupdate never touches them and brew only manages brew's OWN python, so
+# these findings NEVER clear on the normal cycle. We upgrade them into the
+# USER's site-packages (~/.local, ~/Library/Python/<ver>/lib/python/site-packages)
+# — SIP-safe, no writes to system dirs, no root inside the user context. Console
+# user only (root has no meaningful user-site and pip-as-root is a footgun), same
+# guard the brew block uses. Only the well-known SYSTEM interpreters below; venvs
+# are never enumerated, so we never touch a project's pinned deps.
+#
+# PEP 668: modern CLT/brew python ship an EXTERNALLY-MANAGED marker; even a
+# --user install refuses with "externally-managed-environment" unless
+# --break-system-packages is passed. We try the clean form first and only fall
+# back when stderr actually says so (constraint 4).
+#
+# Time-box (PIP_TIMEOUT): both `pip list --outdated` and `pip install` need the
+# network — a wedged PyPI index would hang the run forever. run_timed mirrors the
+# SU_TIMEOUT kill-background pattern: a hang becomes a COMPLETED run + warning.
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
+  PIP_TIMEOUT=120
+  # Run a console-user shell command with a hard timeout. Combined output -> $2.
+  # Returns the command's rc, or a non-zero (137 = SIGKILL) if the killer fired.
+  run_timed(){  # $1 = command string (bash -lc as console user), $2 = outfile
+    local cmd="$1" outf="$2" pid killer rc
+    ( sudo -u "$CONSOLE_USER" bash -lc "$cmd" ) > "$outf" 2>&1 &
+    pid=$!
+    ( sleep "$PIP_TIMEOUT"; kill -9 "$pid" 2>/dev/null ) &
+    killer=$!
+    wait "$pid" 2>/dev/null; rc=$?
+    kill "$killer" 2>/dev/null
+    return "$rc"
+  }
+  # Known SYSTEM interpreters ONLY (CLT, Apple-Silicon brew, Intel brew/local).
+  # Missing paths and pip-less pythons are skipped silently. Space-separated so
+  # the loop stays bash-3.2 plain (no arrays needed here).
+  PIP_PYTHONS="/usr/bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3"
+  for PY in $PIP_PYTHONS; do
+    [ -x "$PY" ] || continue
+    # Must actually expose pip (a bare CLT python3 may not) — probe quietly.
+    sudo -u "$CONSOLE_USER" "$PY" -m pip --version >/dev/null 2>&1 || continue
+
+    POUT="$LOG_DIR/pip_outdated.$$"
+    run_timed "$PY -m pip list --outdated --format=json --disable-pip-version-check" "$POUT"; prc=$?
+    if [ "$prc" -ne 0 ]; then
+      # offline / wedged index / timeout — warn, keep STATUS success (constraint 5)
+      note_warn "pip list --outdated failed ($PY rc=$prc — offline or wedged index?); skipped"
+      rm -f "$POUT"; continue
+    fi
+    # Parse names from the JSON array WITHOUT jq (not on stock macOS). grep -oE
+    # prints one match per line regardless of the array being one physical line.
+    OUTDATED=$(grep -oE '"name":[[:space:]]*"[^"]+"' "$POUT" | sed -E 's/^"name":[[:space:]]*"//; s/"$//')
+    rm -f "$POUT"
+    [ -n "$OUTDATED" ] || continue          # nothing outdated for this interpreter
+    N=$(printf '%s\n' "$OUTDATED" | grep -c .)
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+      # Dry-run stays dry: report count + would-upgrade names, install nothing.
+      PIP_UPDATES=$((PIP_UPDATES + N))
+      echo "DRY RUN — pip outdated ($N) for $PY:"
+      printf '%s\n' "$OUTDATED"
+      continue
+    fi
+
+    # One upgrade transaction per interpreter. Upgrading pip ITSELF is desired
+    # (CLT pip 21.2.4 is one of the flagged packages). $OUTDATED is intentionally
+    # unquoted for word-splitting into args (pip names never contain spaces).
+    PINS="$LOG_DIR/pip_install.$$"
+    run_timed "$PY -m pip install --user --upgrade $OUTDATED" "$PINS"; irc=$?
+    if [ "$irc" -eq 0 ]; then
+      PIP_UPDATES=$((PIP_UPDATES + N)); echo "pip upgraded ($N) for $PY"
+    elif grep -qi 'externally-managed' "$PINS"; then
+      # PEP 668 fallback — retry ONCE allowing the user-site install past the marker.
+      run_timed "$PY -m pip install --user --upgrade --break-system-packages $OUTDATED" "$PINS"; irc=$?
+      if [ "$irc" -eq 0 ]; then
+        PIP_UPDATES=$((PIP_UPDATES + N)); echo "pip upgraded ($N, PEP668 fallback) for $PY"
+      else
+        pmsg=$(grep -iE 'error|fatal|denied|not permitted|no such|not found|could not' "$PINS" | tail -2 | tr '\n' ' ' | cut -c1-400)
+        note_err "pip upgrade failed ($PY rc=$irc): ${pmsg:-no output}"
+      fi
+    else
+      pmsg=$(grep -iE 'error|fatal|denied|not permitted|no such|not found|could not' "$PINS" | tail -2 | tr '\n' ' ' | cut -c1-400)
+      note_err "pip upgrade failed ($PY rc=$irc): ${pmsg:-no output}"
+    fi
+    rm -f "$PINS"
+  done
+fi
+
 DUR=$(( $(date +%s) - START ))
-JSON=$(printf '{"timestamp":"%s","tool":"aegis","host":"%s","os_family":"macos","group":"%s","dry_run":%s,"apple_updates":%s,"brew_ran":%s,"cask_ran":%s,"casks_adopted":%s,"reboot_required":%s,"errors":"%s","duration_sec":%s,"status":"%s"}' \
+JSON=$(printf '{"timestamp":"%s","tool":"aegis","host":"%s","os_family":"macos","group":"%s","dry_run":%s,"apple_updates":%s,"brew_ran":%s,"cask_ran":%s,"casks_adopted":%s,"pip_updates":%s,"reboot_required":%s,"errors":"%s","duration_sec":%s,"status":"%s"}' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(jstr "$HOST")" "$(jstr "$GROUP")" \
-  "$([ $DRY_RUN -eq 1 ] && echo true || echo false)" "$(num "$OS_UPDATES")" "$(num "$BREW_UPDATES")" "$(num "$CASK_UPDATES")" "$(num "$CASKS_ADOPTED")" \
+  "$([ $DRY_RUN -eq 1 ] && echo true || echo false)" "$(num "$OS_UPDATES")" "$(num "$BREW_UPDATES")" "$(num "$CASK_UPDATES")" "$(num "$CASKS_ADOPTED")" "$(num "$PIP_UPDATES")" \
   "$([ $REBOOT_REQ -eq 1 ] && echo true || echo false)" "$(jstr "$ERRORS")" "$(num "$DUR")" "$(jstr "$STATUS")")
 
 echo "$JSON" >> "$LOG"; echo "$JSON"
