@@ -78,6 +78,20 @@ exec "$(dirname "$0")/aegis.d/aegis.sh" --apply "$@"
 WRAP
 chmod +x "$OSSEC/active-response/bin/aegis-apply"
 
+# reboot wrapper — scheduled-maintenance reboot AR (used by the patch cron).
+# Delayed so the patch result line flushes to the manager before the box goes
+# down; first stdout line is the execd handshake (see aegis.sh SIGPIPE note),
+# then everything is redirected so the child can never die on a closed pipe.
+cat > "$OSSEC/active-response/bin/aegis-reboot" <<'WRAP'
+#!/usr/bin/env bash
+echo "Aegis: reboot scheduled"
+exec >> /var/log/aegis/aegis-reboot.log 2>&1 || true
+sleep 5
+shutdown -r +1 2>/dev/null || sudo -n shutdown -r +1 2>/dev/null || { echo "Aegis: reboot unavailable"; exit 1; }
+echo "reboot scheduled $(date -u +%H:%M:%SZ)"
+WRAP
+chmod +x "$OSSEC/active-response/bin/aegis-reboot"
+
 # self-update wrapper + script — lets the manager push engine updates fleet-wide via
 # the `aegis-nix-update` AR command. Re-pulls the engine + re-runs bootstrap, no restart.
 cat > "$OSSEC/active-response/bin/aegis-update" <<'WRAP'

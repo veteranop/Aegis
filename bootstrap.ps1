@@ -77,6 +77,16 @@ if exist "%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe" set "PS=
 "%PS%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0aegis\aegis.ps1" -Apply %*
 '@
 
+# 4b2. reboot wrapper — scheduled-maintenance reboot AR (used by the patch cron).
+# Delayed so the patch result line flushes to the manager before the box goes down.
+$cmdReboot = Join-Path $agent "active-response\bin\aegis-reboot.cmd"
+Set-Content -Path $cmdReboot -Encoding ASCII -Value @'
+@echo off
+rem Aegis reboot command - scheduled maintenance reboot (60s delay).
+echo Aegis: reboot scheduled
+shutdown /r /t 60 /c "VeteranOp scheduled maintenance reboot"
+'@
+
 # 4c. self-update wrapper — lets the manager push engine updates fleet-wide via the
 # `aegis-win-update` AR command. It re-pulls the pinned engine and re-runs bootstrap
 # with AEGIS_NO_RESTART so it never bounces the agent that's running it.
