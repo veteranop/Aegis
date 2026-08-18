@@ -96,12 +96,19 @@ brew_run(){  # $1 = failure label, $2 = command string (run under bash -lc)
   #   - a Caskroom-vs-/Applications version skew ("... but is X for /Applications"
   #     — balenaetcher),
   #   - a cask's own launchctl probe (pearcleaner).
+  #   - the brew-cask --adopt chmod step failing headless on Ascend Mac minis
+  #     (claude/obsidian/visual-studio-code/google-chrome, nightly since
+  #     2026-08-13, M2623001): `sudo -E -- chmod -R a+rX /Applications/*.app`
+  #     exits 1 with EMPTY output when the console user has no passwordless
+  #     sudo — brew reports "Failure while executing; ... exited with 1.
+  #     Here's the output:" with nothing after. The Apple update still
+  #     installed (apple_updates=1); only the adopt step is environmental.
   # None are patch-engine bugs; flipping the WHOLE run to error on them buries a
   # genuine regression and pages on state a patch pass can't fix. Downgrade to
   # AEGIS-WARN. Everything else — brew itself broken, Rosetta trap, git dubious
   # ownership, HOME/PWD unset, Caskroom perms, formulae-API network down — has NO
   # such marker and stays a real error. Classify on the FULL output, not $msg.
-  if printf '%s\n' "$out" | grep -qiE 'Problems with multiple casks|a password is required|a terminal is required to read the password|App source .* is not there|Download failed|curl: \([0-9]+\)|returned error: (40[0-9]|50[0-9])|launchctl|but is .* for /Applications'; then
+  if printf '%s\n' "$out" | grep -qiE 'Problems with multiple casks|a password is required|a terminal is required to read the password|App source .* is not there|Download failed|curl: \([0-9]+\)|returned error: (40[0-9]|50[0-9])|launchctl|but is .* for /Applications|Failure while executing;.*chmod -R a\+rX'; then
     note_warn "$label (environmental, rc=$rc): ${msg:-no output}"
     return 1
   fi
