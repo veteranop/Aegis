@@ -114,7 +114,18 @@ try {
 
   Write-Output ("Aegis: role={0} (via {1}) | reboot={2} | os={3} | pins={4} | dry_run={5}" -f `
     $result.role, $result.source, $pol.reboot, $pol.os, ($pins -join ","), (-not $Apply))
-  & powershell -NoProfile -ExecutionPolicy Bypass -File $patch @pargs
+  # Launch the child runner under the 64-bit host. A bare "powershell" here is a
+  # trap: under AR/execd (LocalSystem, 32-bit) it resolves via PATH to SysWOW64 --
+  # wrong ProgramFiles + wrong PSModulePath, so winget and PSWindowsUpdate vanish --
+  # and on hosts with a trimmed SYSTEM PATH it is simply NOT FOUND, which aborts the
+  # whole run in ~4s with "The term 'powershell' is not recognized" and applies
+  # nothing. Mirror the sysnative resolution the aegis.cmd wrapper already does.
+  # (fixed 2026-10-15, H2628806 -- MARK_MAIN failed every run 2026-08-29..09-16.)
+  $psExe = Join-Path $PSHOME "powershell.exe"
+  $sysnative = Join-Path $env:SystemRoot "sysnative\WindowsPowerShell\v1.0\powershell.exe"
+  if (Test-Path $sysnative) { $psExe = $sysnative }
+  if (-not (Test-Path $psExe)) { throw "powershell.exe not found (tried $psExe) - cannot run patch-windows.ps1" }
+  & $psExe -NoProfile -ExecutionPolicy Bypass -File $patch @pargs
 }
 catch {
   $result.status = "error"; $result.note = "$($_.Exception.Message)"
