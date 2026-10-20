@@ -151,10 +151,41 @@ if ($Role) {
 
 # 7. restart the agent to pick up config — skipped on self-update (AEGIS_NO_RESTART=1)
 # so an AR-triggered update doesn't bounce the agent that's running it.
-if ($env:AEGIS_NO_RESTART -ne "1") {
+#
+# ALSO skipped when we are ourselves a child of the Wazuh agent. A `<wodle name="command">`
+# bootstrap with `<run_on_start>yes</run_on_start>` fires on every agent start; bootstrap
+# then restarts its own parent, the agent comes back, the wodle fires again -> the agent
+# never settles. Observed live 2026-10-20 on two production hosts: keepalive froze, AR
+# returned "agent is not active" while both machines pinged fine, and the only symptom in
+# the manager was start/stop pairs every ~20s. A restart is not needed in that path anyway:
+# group config is served by the manager on connect.
+function Test-RunningUnderWazuhAgent {
+    try {
+        $procId = $PID
+        for ($depth = 0; $depth -lt 6; $depth++) {
+            $p = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction Stop
+            if (-not $p) { return $false }
+            if ($p.Name -match '^(wazuh|ossec)') { return $true }
+            $procId = [int]$p.ParentProcessId
+            if ($procId -le 4) { return $false }
+        }
+    } catch { return $false }
+    return $false
+}
+
+$restartSkipReason = $null
+if ($env:AEGIS_NO_RESTART -eq "1") {
+    $restartSkipReason = "AEGIS_NO_RESTART=1"
+} elseif (Test-RunningUnderWazuhAgent) {
+    $restartSkipReason = "running under the Wazuh agent (restart-storm guard)"
+}
+
+if (-not $restartSkipReason) {
     foreach ($svc in @("WazuhSvc", "Wazuh", "OssecSvc")) {
         if (Get-Service -Name $svc -ErrorAction SilentlyContinue) { Restart-Service -Name $svc -Force; break }
     }
+} else {
+    Write-Host "Aegis: agent restart skipped ($restartSkipReason)"
 }
 
 # 7b. SSH ops-key provisioning (AEGIS_SSH_KEY=0 to skip): hosts get the public key
