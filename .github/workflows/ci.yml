@@ -1,0 +1,62 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck (engine scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          shellcheck --version
+          shellcheck -x -S warning aegis.sh bootstrap.sh patch-linux.sh patch-mac.sh server-setup.sh
+
+  checksums:
+    name: SHA256SUMS pin verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify engine file checksums
+        run: |
+          # The bootstrap pins a tag and verifies these sums before installing, so a
+          # mismatch here means the pin is broken. If you intentionally changed an
+          # engine file, regenerate the manifest in the same commit:
+          #   sha256sum aegis.sh patch-linux.sh patch-mac.sh roles.json > SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+  json:
+    name: roles.json well-formed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m json.tool roles.json > /dev/null
+
+  powershell-parse:
+    name: PowerShell syntax parse
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse .ps1 files
+        shell: pwsh
+        run: |
+          $bad = 0
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) {
+              $bad++
+              Write-Host "::error file=$($_.FullName)::$($errors.Count) parse error(s)"
+              $errors | ForEach-Object { Write-Host "  $($_.Extent.StartLineNumber): $($_.Message)" }
+            } else {
+              Write-Host "ok  $($_.Name)"
+            }
+          }
+          if ($bad -gt 0) { exit 1 }

@@ -18,7 +18,11 @@ UPGRADE_TIMEOUT=300
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
-    --allow-reboot) ALLOW_REBOOT=1 ;;
+    # Accepted for CLI parity with patch-mac.sh; on Linux the reboot is driven by
+    # the bin/aegis-reboot Active-Response wrapper (see bootstrap.sh), never by the
+    # patch run itself — so this flag is parsed and intentionally not acted on here,
+    # but it is exported so any child step can see the operator's intent.
+    --allow-reboot) ALLOW_REBOOT=1; export ALLOW_REBOOT ;;
     --group) GROUP="$2"; shift ;;
     --exclusions) EXCL_FILE="$2"; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
