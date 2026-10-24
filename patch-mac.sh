@@ -236,8 +236,8 @@ if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
       echo "DRY RUN — brew outdated (formulae + casks):"
       (cd /tmp && sudo -H -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW update >/dev/null 2>&1; $BREW outdated; echo '-- casks --'; $BREW outdated --cask") || true
-      BREW_UPDATES=$((cd /tmp && sudo -H -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW outdated | wc -l") 2>/dev/null | tr -d ' ' || echo 0)
-      CASK_UPDATES=$((cd /tmp && sudo -H -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW outdated --cask | wc -l") 2>/dev/null | tr -d ' ' || echo 0)
+      BREW_UPDATES=$( (cd /tmp && sudo -H -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW outdated | wc -l") 2>/dev/null | tr -d ' ' || echo 0)
+      CASK_UPDATES=$( (cd /tmp && sudo -H -u "$CONSOLE_USER" "${BREW_ARCH[@]}" bash -lc "$BREW outdated --cask | wc -l") 2>/dev/null | tr -d ' ' || echo 0)
     else
       brew_run "brew upgrade failed" "$BREW update && $BREW upgrade && $BREW cleanup"
       brew_run "brew cask upgrade failed" "$BREW upgrade --cask"
