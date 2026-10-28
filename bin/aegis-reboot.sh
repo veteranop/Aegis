@@ -57,12 +57,22 @@ else
   fi
 fi
 
+# The engine's own verdict is the most reliable signal: if the last patch run
+# concluded reboot_required:true, honour it even when softwareupdate -l is
+# unhelpful (a wedged softwareupdated makes the local probe miss the debt).
+PATCHLOG=/var/log/aegis/aegis-patch.log
+if [ "$NEEDED" = "false" ] && [ -r "$PATCHLOG" ]; then
+  if tail -n 5 "$PATCHLOG" 2>/dev/null | grep -q '"reboot_required": *true'; then
+    NEEDED=true
+    REASON=engine-reboot-required
+  fi
+fi
+
 if [ "$MODE" = "--check" ]; then
   emit "$NEEDED" "$REASON" check
   echo "Aegis reboot: needed=$NEEDED reason=$REASON (check only, no action)"
   exit 0
 fi
-
 if [ "$NEEDED" = "true" ]; then
   # Schedule the restart FIRST, then log: nothing may kill this child before the
   # shutdown is queued.
