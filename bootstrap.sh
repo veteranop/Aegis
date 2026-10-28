@@ -174,6 +174,13 @@ echo "Aegis reboot: not needed ($REASON) - skipping (debt-gated)"
 exit 0
 WRAP
 chmod +x "$OSSEC/active-response/bin/aegis-reboot"
+# Marker: proves which wrapper version this bootstrap laid down. The agent already
+# ships /var/log/aegis/aegis-app.log, so this shows up in the indexer instead of
+# being an unverifiable silent install.
+mkdir -p /var/log/aegis 2>/dev/null || true
+printf '{"timestamp":"%s","tool":"aegis","app":"reboot","host":"%s","os_family":"%s","wrapper":"v2-debt-gated","reboot_action":"bootstrap-installed"}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(hostname -s 2>/dev/null || hostname)" \
+  "$(uname -s | tr '[:upper:]' '[:lower:]')" >> /var/log/aegis/aegis-app.log 2>/dev/null || true
 
 # self-update wrapper + script — lets the manager push engine updates fleet-wide via
 # the `aegis-nix-update` AR command. Re-pulls the engine + re-runs bootstrap, no restart.
