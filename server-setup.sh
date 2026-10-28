@@ -182,7 +182,9 @@ for _ar in \
   "aegis-win-apply0 - aegis-apply.cmd - 0" \
   "aegis-nix-apply0 - aegis-apply - 0" \
   "aegis-win-update0 - aegis-update.cmd - 0" \
-  "aegis-nix-update0 - aegis-update - 0"; do
+  "aegis-nix-update0 - aegis-update - 0" \
+  "aegis-reboot-win0 - aegis-reboot.cmd - 0" \
+  "aegis-reboot-nix0 - aegis-reboot - 0"; do
   _name="${_ar%% -*}"
   if ! grep -q "^${_name} " "$AR_CONF"; then
     echo "$_ar" >> "$AR_CONF"
@@ -251,6 +253,14 @@ for role in "${ROLES[@]}"; do
   <command>
     <name>aegis-nix-update0</name>
     <executable>aegis-update</executable>
+  </command>
+  <command>
+    <name>aegis-reboot-win0</name>
+    <executable>aegis-reboot.cmd</executable>
+  </command>
+  <command>
+    <name>aegis-reboot-nix0</name>
+    <executable>aegis-reboot</executable>
   </command>
 
   <!-- OPTIONAL scheduled patching (uncomment + set command path/interval to enable):
